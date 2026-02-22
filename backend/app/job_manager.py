@@ -130,46 +130,50 @@ class JobManager:
         return job.artifact_path
 
     def _run_job(self, job: JobState) -> None:
-        with self._worker_lock:
-            self._set_status(job, "running")
-            user_root = self.server_data_dir / _safe_key_fragment(str(job.payload.get("_api_key_id", "")))
-            user_db = user_root / "tender_manager.db"
-            user_projects = user_root / "projects"
-            user_downloads = user_root / "downloads"
-            user_templates = user_root / "templates"
-            for p in (user_projects, user_downloads, user_templates):
-                p.mkdir(parents=True, exist_ok=True)
+        bridge_stop: threading.Event | None = None
+        log_stop: threading.Event | None = None
+        bridge: threading.Thread | None = None
+        log_thread: threading.Thread | None = None
+        try:
+            with self._worker_lock:
+                self._set_status(job, "running")
+                user_root = self.server_data_dir / _safe_key_fragment(str(job.payload.get("_api_key_id", "")))
+                user_db = user_root / "tender_manager.db"
+                user_projects = user_root / "projects"
+                user_downloads = user_root / "downloads"
+                user_templates = user_root / "templates"
+                for p in (user_projects, user_downloads, user_templates):
+                    p.mkdir(parents=True, exist_ok=True)
 
-            core.save_app_paths_config(
-                db_file=str(user_db),
-                root_folder=str(user_projects),
-                download_folder=str(user_downloads),
-                template_folder=str(user_templates),
-            )
-            core.DB_FILE = str(user_db)
-            core.ROOT_FOLDER = str(user_projects)
-            core.BASE_DOWNLOAD_DIRECTORY = str(user_downloads)
-            core.TEMPLATE_LIBRARY_FOLDER = str(user_templates)
-            incoming_db_b64 = str(job.payload.get("db_snapshot_base64") or "").strip()
-            if incoming_db_b64:
-                raw_db = base64.b64decode(incoming_db_b64.encode("ascii"))
-                user_db.write_bytes(raw_db)
-            core.initialize_database()
+                core.save_app_paths_config(
+                    db_file=str(user_db),
+                    root_folder=str(user_projects),
+                    download_folder=str(user_downloads),
+                    template_folder=str(user_templates),
+                )
+                core.DB_FILE = str(user_db)
+                core.ROOT_FOLDER = str(user_projects)
+                core.BASE_DOWNLOAD_DIRECTORY = str(user_downloads)
+                core.TEMPLATE_LIBRARY_FOLDER = str(user_templates)
+                incoming_db_b64 = str(job.payload.get("db_snapshot_base64") or "").strip()
+                if incoming_db_b64:
+                    raw_db = base64.b64decode(incoming_db_b64.encode("ascii"))
+                    user_db.write_bytes(raw_db)
+                core.init_db()
 
-            before = _list_files_with_meta(user_downloads)
-            bridge_stop = threading.Event()
-            bridge = threading.Thread(
-                target=self._captcha_bridge_worker,
-                args=(job, bridge_stop),
-                daemon=True,
-            )
-            bridge.start()
+                before = _list_files_with_meta(user_downloads)
+                bridge_stop = threading.Event()
+                bridge = threading.Thread(
+                    target=self._captcha_bridge_worker,
+                    args=(job, bridge_stop),
+                    daemon=True,
+                )
+                bridge.start()
 
-            log_stop = threading.Event()
-            log_thread = threading.Thread(target=self._log_pump_worker, args=(job, log_stop), daemon=True)
-            log_thread.start()
+                log_stop = threading.Event()
+                log_thread = threading.Thread(target=self._log_pump_worker, args=(job, log_stop), daemon=True)
+                log_thread.start()
 
-            try:
                 self._execute_action(job)
                 after = _list_files_with_meta(user_downloads)
                 changed_count = 0
@@ -192,17 +196,22 @@ class JobManager:
                     "artifact_available": bool(job.artifact_path and job.artifact_path.exists()),
                 }
                 self._set_status(job, "completed")
-            except Exception as exc:
-                job.error = str(exc)
-                self._set_status(job, "failed")
-            finally:
+        except Exception as exc:
+            job.error = str(exc)
+            self._append_log(job, f"Job failed: {exc}")
+            self._set_status(job, "failed")
+        finally:
+            if bridge_stop is not None:
                 bridge_stop.set()
+            if log_stop is not None:
                 log_stop.set()
+            if bridge is not None:
                 bridge.join(timeout=1.5)
+            if log_thread is not None:
                 log_thread.join(timeout=1.5)
-                with self._lock:
-                    job.pending_challenge_id = None
-                    job.captcha = None
+            with self._lock:
+                job.pending_challenge_id = None
+                job.captcha = None
 
     def _set_status(self, job: JobState, status_txt: str) -> None:
         with self._lock:
