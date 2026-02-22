@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+build/
+dist/
+deploy/
+Tender_Downloads/
+My_Tender_Projects/
+Old Codes/
+*.db

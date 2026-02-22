@@ -1,0 +1,199 @@
+{
+  "viewtenders_selected_site": "ALL",
+  "last_main_view": "ViewTenders",
+  "viewtenders_last_tab": "orgs",
+  "viewtenders_sort_orgs": "{\"column\": \"Website\", \"ascending\": true}",
+  "viewtenders_export_excel_cols": [
+    "Sr",
+    "Tender ID",
+    "Title",
+    "Value",
+    "EMD",
+    "Org Chain",
+    "Closing Date",
+    "Closing Time",
+    "Pre-Bid",
+    "Location",
+    "Category",
+    "Select",
+    "Download"
+  ],
+  "viewtenders_export_excel_widths": {
+    "Sr": 8,
+    "Website": 22,
+    "Tender ID": 14,
+    "Title": 57,
+    "Work Description": 60,
+    "Value": 14,
+    "EMD": 14,
+    "Org Chain": 27,
+    "Closing Date": 20,
+    "Closing Time": 17,
+    "Pre-Bid": 14,
+    "Location": 31,
+    "Category": 14,
+    "Select": 12,
+    "Download": 17
+  },
+  "viewtenders_export_pdf_cols": [
+    "Sr",
+    "Tender ID",
+    "Title",
+    "Value",
+    "EMD",
+    "Org Chain",
+    "Closing Date",
+    "Closing Time",
+    "Pre-Bid",
+    "Location",
+    "Category",
+    "Select",
+    "Download"
+  ],
+  "viewtenders_export_pdf_widths": {
+    "Sr": 8,
+    "Website": 22,
+    "Tender ID": 14,
+    "Title": 57,
+    "Work Description": 60,
+    "Value": 14,
+    "EMD": 14,
+    "Org Chain": 27,
+    "Closing Date": 20,
+    "Closing Time": 17,
+    "Pre-Bid": 14,
+    "Location": 31,
+    "Category": 14,
+    "Select": 12,
+    "Download": 17
+  },
+  "viewtenders_export_cols": [
+    "Sr",
+    "Title",
+    "Value",
+    "EMD",
+    "Org Chain",
+    "Closing Date",
+    "Closing Time",
+    "Pre-Bid",
+    "Location"
+  ],
+  "viewtenders_export_order": [
+    "Sr",
+    "Website",
+    "Tender ID",
+    "Title",
+    "Work Description",
+    "Value",
+    "EMD",
+    "Org Chain",
+    "Closing Date",
+    "Closing Time",
+    "Pre-Bid",
+    "Location",
+    "Category",
+    "Select",
+    "Download"
+  ],
+  "viewtenders_widths_tenders": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 170, \"Title\": 260, \"Work Description\": 0, \"Value\": 89, \"EMD\": 73, \"Org Chain\": 128, \"Closing Date\": 102, \"Closing Time\": 116, \"Pre-Bid\": 171, \"Location\": 220, \"Category\": 140, \"Select\": 77, \"Download\": 120}",
+  "viewtenders_widths_orgs": "{\"Sr\": 48, \"Website\": 107, \"Name\": 700, \"Count\": 100, \"Select\": 293}",
+  "viewtenders_widths_archived": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 190, \"Title\": 360, \"Work Description\": 0, \"Value\": 130, \"EMD\": 0, \"Org Chain\": 0, \"Closing Date\": 0, \"Closing Time\": 0, \"Pre-Bid\": 0, \"Location\": 0, \"Category\": 0, \"Status\": 130, \"Select\": 88, \"Download\": 288}",
+  "viewtenders_cols_archived": "[\"Sr\", \"Tender ID\", \"Title\", \"Value\", \"Status\", \"Select\", \"Download\"]",
+  "viewtenders_sort_archived": "{\"column\": \"Status\", \"ascending\": false}",
+  "viewtenders_search_tenders": "",
+  "viewtenders_sort_tenders": "{\"column\": \"Select\", \"ascending\": false}",
+  "viewtenders_search_archived": "",
+  "studio_ui_url": "http://localhost:9002",
+  "main_last_view": "online",
+  "viewtenders_cols_tenders": "[\"Sr\", \"Tender ID\", \"Title\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Select\", \"Download\"]",
+  "viewtenders_order_tenders": "[\"Sr\", \"Website\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Select\", \"Pre-Bid\", \"Tender ID\", \"Location\", \"Category\", \"Download\"]",
+  "viewtenders_cols_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
+  "viewtenders_order_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
+  "viewtenders_order_archived": "[\"Sr\", \"Website\", \"Tender ID\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Status\", \"Select\", \"Download\"]",
+  "main_window_maximized": true,
+  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAAAAABgAAAS/AAACQAAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
+  "viewtenders_search_orgs": "",
+  "viewtenders_filters_tenders": "{}",
+  "templates_page_column_widths": [
+    90,
+    268,
+    289,
+    595
+  ],
+  "templates_page_splitter_sizes": [
+    859,
+    385
+  ],
+  "template_manual_org_options": [
+    "MMRDA",
+    "MCGM"
+  ],
+  "project_details_preview_splitter_sizes": [
+    892,
+    356
+  ],
+  "project_details_table_layout_default": {
+    "widths": [
+      52,
+      210,
+      220,
+      120,
+      140,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_details_table_layout_7": {
+    "widths": [
+      52,
+      380,
+      419,
+      120,
+      275,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_details_table_layout_18": {
+    "widths": [
+      52,
+      252,
+      269,
+      120,
+      197,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "projects_cols_visibility": "{\"Sr\": false, \"ID\": true, \"Tender Id\": false, \"Name of Work\": false, \"Client\": false, \"Value\": false, \"Prebid\": false, \"Deadline\": false, \"Time Remaining\": false}",
+  "projects_cols_order": "[\"Sr\", \"ID\", \"Tender Id\", \"Name of Work\", \"Client\", \"Value\", \"Prebid\", \"Deadline\", \"Time Remaining\"]",
+  "projects_cols_widths": "{\"Sr\": 52, \"ID\": 0, \"Tender Id\": 180, \"Name of Work\": 406, \"Client\": 191, \"Value\": 89, \"Prebid\": 91, \"Deadline\": 86, \"Time Remaining\": 164}",
+  "projects_entry_mode": "popup"
+}
