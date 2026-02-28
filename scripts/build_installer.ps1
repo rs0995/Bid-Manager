@@ -44,7 +44,7 @@ if (-not $versionWritten) {
 Write-Host "Installer build version: $BuildVersion ($BuildUtc)"
 
 $distRoot = Join-Path "dist" ("installer_" + $BuildVersion)
-$workPath = "build\pyi_onedir"
+$workPath = Join-Path "build" ("pyi_onedir_" + $BuildVersion)
 $buildArgs = @(
     "-m", "PyInstaller",
     "--noconfirm",

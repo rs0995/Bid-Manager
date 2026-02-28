@@ -11,12 +11,14 @@ def utcnow() -> datetime:
 
 
 JobAction = Literal[
+    "sync_state",
     "fetch_organisations",
     "fetch_tenders",
     "download_tenders",
     "download_results",
     "check_status",
     "single_download",
+    "deliver_tender_docs",
 ]
 
 

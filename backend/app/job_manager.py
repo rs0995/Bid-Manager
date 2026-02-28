@@ -41,8 +41,16 @@ def _build_changed_artifact(
     download_root: Path,
     db_path: Path,
     artifact_dir: Path,
+    force_include_prefixes: list[str] | None = None,
 ) -> tuple[Path | None, int]:
     changed = [rel for rel, meta in after.items() if before.get(rel) != meta]
+    prefixes = [str(x or "").strip().replace("\\", "/").strip("/") for x in (force_include_prefixes or []) if str(x or "").strip()]
+    if prefixes:
+        forced = [
+            rel for rel in after
+            if any(rel == prefix or rel.startswith(prefix + "/") for prefix in prefixes)
+        ]
+        changed = sorted(set(changed).union(forced))
     artifact_dir.mkdir(parents=True, exist_ok=True)
     zip_path = artifact_dir / f"{job_id}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -179,6 +187,7 @@ class JobManager:
                 changed_count = 0
                 if job.build_artifact:
                     artifact_dir = user_root / "artifacts"
+                    force_prefixes = job.payload.get("_artifact_include_prefixes") or []
                     artifact, changed_count = _build_changed_artifact(
                         job_id=job.job_id,
                         before=before,
@@ -186,6 +195,7 @@ class JobManager:
                         download_root=user_downloads,
                         db_path=user_db,
                         artifact_dir=artifact_dir,
+                        force_include_prefixes=force_prefixes if isinstance(force_prefixes, list) else None,
                     )
                     job.artifact_path = artifact
 
@@ -279,6 +289,8 @@ class JobManager:
         payload.pop("_api_key", None)
         action = job.action
 
+        if action == "sync_state":
+            return
         if action == "fetch_organisations":
             core.ScraperBackend.fetch_organisations_logic(int(payload["website_id"]))
             return
@@ -308,5 +320,47 @@ class JobManager:
                 int(payload["tender_db_id"]),
                 str(payload["mode"]),
             )
+            return
+        if action == "deliver_tender_docs":
+            tender_id = str(payload.get("source_tender_id") or "").strip()
+            mode = str(payload.get("mode") or "full").strip().lower()
+            if mode not in {"full", "update"}:
+                mode = "full"
+            if not tender_id:
+                raise ValueError("source_tender_id is required.")
+
+            conn = core.sqlite3.connect(core.DB_FILE)
+            try:
+                row = conn.execute(
+                    "SELECT id, COALESCE(folder_path,'') FROM tenders "
+                    "WHERE TRIM(COALESCE(tender_id,''))=? AND COALESCE(is_archived,0)=0 "
+                    "ORDER BY id DESC LIMIT 1",
+                    (tender_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                raise ValueError(f"Tender not found for id '{tender_id}'.")
+
+            tender_db_id = int(row[0])
+            safe_id = core.re.sub(r'[\\/*?:"<>|]', "", tender_id)
+            preferred_dir = Path(core.BASE_DOWNLOAD_DIRECTORY) / safe_id
+            existing_folder = str(row[1] or "").strip()
+            existing_path = Path(existing_folder) if existing_folder else None
+            target_dir = existing_path if existing_path and existing_path.is_dir() else preferred_dir
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            has_existing_files = any(p.is_file() for p in target_dir.rglob("*"))
+            if mode == "full":
+                if not has_existing_files:
+                    core.ScraperBackend.download_single_tender_logic(tender_db_id, "full")
+            else:
+                core.ScraperBackend.download_single_tender_logic(tender_db_id, "update")
+
+            try:
+                rel_prefix = str(target_dir.relative_to(Path(core.BASE_DOWNLOAD_DIRECTORY))).replace("\\", "/")
+            except Exception:
+                rel_prefix = safe_id
+            job.payload["_artifact_include_prefixes"] = [rel_prefix]
             return
         raise ValueError(f"Unsupported action: {action}")

@@ -1,5 +1,6 @@
 {
   "db_file": "C:\\Users\\raksh\\OneDrive\\Desktop\\Bid Management\\tender_manager.db",
   "root_folder": "C:\\Users\\raksh\\OneDrive\\Desktop\\Bid Management\\My_Tender_Projects",
-  "download_folder": "C:\\Users\\raksh\\OneDrive\\Desktop\\Bid Management\\Tender_Downloads"
+  "download_folder": "C:\\Users\\raksh\\OneDrive\\Desktop\\Bid Management\\Tender_Downloads",
+  "template_folder": "C:\\Users\\raksh\\OneDrive\\Desktop\\Bid Management\\Checklist_Templates"
 }

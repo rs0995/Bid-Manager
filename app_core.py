@@ -16,6 +16,9 @@ import zipfile
 import hashlib
 import textwrap
 import tempfile
+import importlib
+import urllib.request
+import urllib.error
 from urllib.parse import urlparse, urljoin, parse_qs, parse_qsl, urlencode, urlunparse
 
 # --- External Libraries for Scraper (lazy-loaded for faster app startup) ---
@@ -123,23 +126,24 @@ def ensure_scraper_dependencies():
         return False
     _SCRAPER_IMPORT_ATTEMPTED = True
     try:
-        import requests as _requests
-        from bs4 import BeautifulSoup as _BeautifulSoup
-        from PIL import Image as _Image
-        import google.generativeai as _genai
-        from selenium import webdriver as _webdriver
-        from selenium.webdriver.firefox.service import Service as _FirefoxService
-        from selenium.webdriver.firefox.options import Options as _FirefoxOptions
-        from selenium.webdriver.common.by import By as _By
-        from selenium.webdriver.support.ui import WebDriverWait as _WebDriverWait, Select as _Select
-        from selenium.webdriver.support import expected_conditions as _EC
-        from selenium.common.exceptions import (
-            TimeoutException as _TimeoutException,
-            WebDriverException as _WebDriverException,
-            StaleElementReferenceException as _StaleElementReferenceException,
-            NoSuchElementException as _NoSuchElementException,
-        )
-        from webdriver_manager.firefox import GeckoDriverManager as _GeckoDriverManager
+        _requests = importlib.import_module("requests")
+        _BeautifulSoup = getattr(importlib.import_module("bs4"), "BeautifulSoup")
+        _Image = importlib.import_module("PIL.Image")
+        _genai = importlib.import_module("google.generativeai")
+        _webdriver = importlib.import_module("selenium.webdriver")
+        _FirefoxService = getattr(importlib.import_module("selenium.webdriver.firefox.service"), "Service")
+        _FirefoxOptions = getattr(importlib.import_module("selenium.webdriver.firefox.options"), "Options")
+        _By = getattr(importlib.import_module("selenium.webdriver.common.by"), "By")
+        _ui_mod = importlib.import_module("selenium.webdriver.support.ui")
+        _WebDriverWait = getattr(_ui_mod, "WebDriverWait")
+        _Select = getattr(_ui_mod, "Select")
+        _EC = importlib.import_module("selenium.webdriver.support.expected_conditions")
+        _exc_mod = importlib.import_module("selenium.common.exceptions")
+        _TimeoutException = getattr(_exc_mod, "TimeoutException")
+        _WebDriverException = getattr(_exc_mod, "WebDriverException")
+        _StaleElementReferenceException = getattr(_exc_mod, "StaleElementReferenceException")
+        _NoSuchElementException = getattr(_exc_mod, "NoSuchElementException")
+        _GeckoDriverManager = getattr(importlib.import_module("webdriver_manager.firefox"), "GeckoDriverManager")
     except Exception as e:
         SCRAPER_IMPORT_ERROR = str(e)
         SCRAPER_AVAILABLE = False
@@ -282,6 +286,7 @@ def get_local_update_info(update_dir):
     newer = is_newer_version(version, APP_VERSION)
     return {
         "ok": True,
+        "source": "local",
         "newer": newer,
         "current_version": APP_VERSION,
         "available_version": version,
@@ -290,6 +295,78 @@ def get_local_update_info(update_dir):
         "built_at_utc": str(manifest.get("built_at_utc", "") or "").strip(),
         "notes": str(manifest.get("notes", "") or "").strip(),
     }
+
+
+def get_remote_update_info(manifest_url):
+    url = str(manifest_url or "").strip()
+    if not url:
+        return {"ok": False, "message": "Update manifest URL is not configured."}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "BidManager-Updater/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        manifest = json.loads(raw) or {}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "message": f"Manifest request failed: HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        return {"ok": False, "message": f"Manifest request failed: {e}"}
+    except Exception as e:
+        return {"ok": False, "message": f"Invalid remote manifest: {e}"}
+
+    version = str(manifest.get("version", "") or "").strip()
+    exe_url = str(manifest.get("exe_url", "") or "").strip()
+    installer_url = str(manifest.get("installer_url", "") or "").strip()
+    if not version:
+        return {"ok": False, "message": "Remote update manifest does not contain a version."}
+    if not exe_url and not installer_url:
+        return {"ok": False, "message": "Remote update manifest missing exe_url/installer_url."}
+
+    newer = is_newer_version(version, APP_VERSION)
+    return {
+        "ok": True,
+        "source": "remote",
+        "newer": newer,
+        "current_version": APP_VERSION,
+        "available_version": version,
+        "exe_url": exe_url,
+        "installer_url": installer_url,
+        "manifest_url": url,
+        "built_at_utc": str(manifest.get("built_at_utc", "") or "").strip(),
+        "notes": str(manifest.get("notes", "") or "").strip(),
+    }
+
+
+def get_update_info(update_dir=None, manifest_url=None):
+    remote_url = str(manifest_url or "").strip()
+    if remote_url:
+        info = get_remote_update_info(remote_url)
+        if info.get("ok"):
+            return info
+        local_info = get_local_update_info(update_dir)
+        if local_info.get("ok"):
+            local_info["message"] = f"Remote update check failed, using local folder. ({info.get('message', '')})"
+            return local_info
+        return info
+    return get_local_update_info(update_dir)
+
+
+def download_remote_update_binary(binary_url, suffix=".exe"):
+    url = str(binary_url or "").strip()
+    if not url:
+        return {"ok": False, "message": "Update URL is empty."}
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="bidmanager_remote_update_")
+        out_path = os.path.join(tmp_dir, f"update{suffix}")
+        req = urllib.request.Request(url, headers={"User-Agent": "BidManager-Updater/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(out_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        return {"ok": True, "path": out_path}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "message": f"Download failed: HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        return {"ok": False, "message": f"Download failed: {e}"}
+    except Exception as e:
+        return {"ok": False, "message": f"Download failed: {e}"}
 
 
 def _write_self_updater_script(source_exe, target_exe):
@@ -330,6 +407,20 @@ def launch_self_update(update_exe_path):
         return True, "Updater started. Closing app..."
     except Exception as e:
         return False, f"Failed to launch updater: {e}"
+
+
+def launch_installer_update(installer_path):
+    source_installer = os.path.abspath(str(installer_path or "").strip())
+    if not os.path.exists(source_installer):
+        return False, f"Installer not found: {source_installer}"
+    try:
+        flags = 0
+        if platform.system().lower().startswith("win"):
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        subprocess.Popen([source_installer], creationflags=flags)
+        return True, "Installer launched. Closing app..."
+    except Exception as e:
+        return False, f"Failed to launch installer update: {e}"
 
 
 def install_runtime_exe_if_needed():

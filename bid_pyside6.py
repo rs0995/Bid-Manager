@@ -1,5 +1,6 @@
 ﻿import datetime
 import json
+import html
 import os
 import shutil
 import sqlite3
@@ -10,6 +11,8 @@ import tempfile
 import zipfile
 import base64
 import time
+import importlib
+import textwrap
 from concurrent.futures import ThreadPoolExecutor
 import queue as py_queue
 
@@ -57,12 +60,16 @@ import app_core as core
 from frontend.api_client import BidApiClient
 from templates_ui import TemplatesPage, import_templates_into_project
 
+FRONTEND_REMOTE_ONLY = str(os.getenv("BID_FRONTEND_REMOTE_ONLY", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 class BackendModeScraperProxy:
     def __init__(self):
         self.local = core.ScraperBackend
 
     def _mode(self):
+        if FRONTEND_REMOTE_ONLY:
+            return "remote"
         raw = str(core.get_user_setting("backend_mode", "local") or "local").strip().lower()
         return "remote" if raw == "remote" else "local"
 
@@ -141,7 +148,6 @@ class BackendModeScraperProxy:
     def _run_remote_action(self, action, payload):
         client = self._new_client()
         body = dict(payload or {})
-        body["db_snapshot_base64"] = self._encode_local_db_b64()
         job = client.create_job(action=action, payload=body, build_artifact=True)
         job_id = str(job.get("job_id") or "")
         if not job_id:
@@ -180,9 +186,12 @@ class BackendModeScraperProxy:
                 time.sleep(1.0)
 
     def _run_or_local(self, method_name, action, payload, *args, **kwargs):
-        if not self._remote_enabled():
-            return getattr(self.local, method_name)(*args, **kwargs)
-        return self._run_remote_action(action=action, payload=payload)
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            return self._run_remote_action(action=action, payload=payload)
+        return getattr(self.local, method_name)(*args, **kwargs)
 
     def get_setting(self, key, default=None):
         return self.local.get_setting(key, default)
@@ -212,6 +221,19 @@ class BackendModeScraperProxy:
             action="fetch_organisations",
             payload={"website_id": int(website_id)},
             website_id=int(website_id),
+        )
+
+    def sync_remote_state(self):
+        if not self._remote_enabled():
+            return True
+        return self._run_remote_action(action="sync_state", payload={})
+
+    def push_local_state(self):
+        if not self._remote_enabled():
+            return True
+        return self._run_remote_action(
+            action="sync_state",
+            payload={"db_snapshot_base64": self._encode_local_db_b64()},
         )
 
     def fetch_tenders_logic(self, website_id):
@@ -263,19 +285,20 @@ class BackendModeScraperProxy:
         )
 
     def _remote_download_to_folder(self, source_tender_id, destination_folder, mode):
+        self._run_remote_action(
+            action="deliver_tender_docs",
+            payload={"source_tender_id": str(source_tender_id or "").strip(), "mode": str(mode or "full").strip().lower()},
+        )
+        safe_id = core.re.sub(r'[\\/*?:"<>|]', "", str(source_tender_id or "").strip())
         conn = sqlite3.connect(core.DB_FILE)
         try:
             row = conn.execute(
-                "SELECT id, website_id, COALESCE(folder_path,'') FROM tenders WHERE tender_id=? AND COALESCE(is_archived,0)=0 ORDER BY id DESC LIMIT 1",
+                "SELECT COALESCE(folder_path,'') FROM tenders WHERE tender_id=? AND COALESCE(is_archived,0)=0 ORDER BY id DESC LIMIT 1",
                 (str(source_tender_id),),
             ).fetchone()
         finally:
             conn.close()
-        if not row:
-            return False
-        db_id, website_id, folder_path = int(row[0]), int(row[1]), str(row[2] or "")
-        self.download_tenders_logic(website_id, target_db_ids=[db_id], forced_mode=mode)
-        safe_id = core.re.sub(r'[\\/*?:"<>|]', "", str(source_tender_id or "").strip())
+        folder_path = str(row[0] or "") if row else ""
         src = folder_path if folder_path and os.path.isdir(folder_path) else os.path.join(core.BASE_DOWNLOAD_DIRECTORY, safe_id)
         copied = self._merge_folder_tree(src, str(destination_folder))
         return bool(copied or os.path.isdir(src))
@@ -298,6 +321,311 @@ def auto_fit_table_rows(table, min_height=24, max_height=None):
             table.setRowHeight(row, min_height)
         elif max_height is not None and h > max_height:
             table.setRowHeight(row, max_height)
+
+
+def _project_tender_info_key(project_id):
+    pid = int(project_id or 0)
+    return f"project_tender_extra_info_{pid}"
+
+
+def _load_project_tender_info(project_id):
+    raw = core.get_user_setting(_project_tender_info_key(project_id), [])
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        k = str(row.get("key", "") or "").strip()
+        v = str(row.get("value", "") or "").strip()
+        if k and v:
+            out.append({"key": k, "value": v})
+    return out
+
+
+def _save_project_tender_info(project_id, items):
+    payload = []
+    for row in (items or []):
+        if not isinstance(row, dict):
+            continue
+        k = str(row.get("key", "") or "").strip()
+        v = str(row.get("value", "") or "").strip()
+        if k and v:
+            payload.append({"key": k, "value": v})
+    core.set_user_setting(_project_tender_info_key(project_id), payload)
+
+
+def _time_remaining_from_text(deadline_text):
+    txt = str(deadline_text or "").strip()
+    if not txt:
+        return "-"
+    fmts = [
+        "%d-%m-%Y %I:%M %p",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ]
+    dt = None
+    for fmt in fmts:
+        try:
+            dt = datetime.datetime.strptime(txt, fmt)
+            break
+        except Exception:
+            continue
+    if dt is None:
+        return "-"
+    now = datetime.datetime.now()
+    secs = int((dt - now).total_seconds())
+    if secs <= 0:
+        return "Expired"
+    days = secs // 86400
+    hours = (secs % 86400) // 3600
+    mins = (secs % 3600) // 60
+    if days > 0:
+        return f"{days}d {hours}h {mins}m"
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def _collect_project_tender_base_info(project_id):
+    pid = int(project_id or 0)
+    if pid <= 0:
+        return []
+    conn = sqlite3.connect(core.DB_FILE)
+    try:
+        p = conn.execute(
+            """SELECT COALESCE(title,''), COALESCE(description,''), COALESCE(client_name,''), COALESCE(project_value,''),
+                      COALESCE(prebid,''), COALESCE(deadline,''), COALESCE(source_tender_id,'')
+               FROM projects WHERE id=?""",
+            (pid,),
+        ).fetchone()
+        if not p:
+            return []
+        proj_tender_id = str(p[6] or "").strip() or str(p[0] or "").strip()
+
+        t_row = None
+        if proj_tender_id:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(tenders)").fetchall()]
+            has_closing_time = "closing_time" in set(cols)
+            closing_time_sql = "COALESCE(closing_time,'')" if has_closing_time else "''"
+            t_row = conn.execute(
+                """SELECT COALESCE(tender_id,''), COALESCE(work_description,''), COALESCE(title,''),
+                          COALESCE(tender_value,''), COALESCE(pre_bid_meeting_date,''), COALESCE(closing_date,''), """
+                + closing_time_sql +
+                """
+                   FROM tenders WHERE tender_id=? ORDER BY id DESC LIMIT 1""",
+                (proj_tender_id,),
+            ).fetchone()
+    finally:
+        conn.close()
+
+    work = str(p[1] or "").strip()
+    client = str(p[2] or "").strip()
+    value = str(p[3] or "").strip()
+    prebid = str(p[4] or "").strip()
+    deadline = str(p[5] or "").strip()
+    tender_id = proj_tender_id
+
+    if t_row:
+        tender_id = str(t_row[0] or "").strip() or tender_id
+        t_work = str(t_row[1] or "").strip() or str(t_row[2] or "").strip()
+        t_work = " ".join(t_work.split())
+        t_value = str(t_row[3] or "").strip()
+        t_prebid = str(t_row[4] or "").strip()
+        t_deadline = f"{str(t_row[5] or '').strip()} {str(t_row[6] or '').strip()}".strip()
+        if not work:
+            work = t_work
+        if not value:
+            value = t_value
+        if not prebid:
+            prebid = t_prebid
+        if not deadline:
+            deadline = t_deadline
+
+    work = " ".join(str(work or "").split())
+    return [
+        {"key": "Tender ID", "value": tender_id or "-"},
+        {"key": "Name of Work", "value": work or "-"},
+        {"key": "Client", "value": client or "-"},
+        {"key": "Value", "value": value or "-"},
+        {"key": "Prebid", "value": prebid or "-"},
+        {"key": "Deadline", "value": deadline or "-"},
+        {"key": "Time Remaining", "value": _time_remaining_from_text(deadline)},
+    ]
+
+
+def _merge_tender_info_rows(base_rows, stored_rows):
+    merged = []
+    idx_by_key = {}
+
+    def _norm_rows(rows):
+        out = []
+        for row in (rows or []):
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key", "") or "").strip()
+            value = str(row.get("value", "") or "").strip()
+            if key:
+                out.append({"key": key, "value": value})
+        return out
+
+    for row in _norm_rows(base_rows):
+        idx_by_key[row["key"].lower()] = len(merged)
+        merged.append(row)
+
+    for row in _norm_rows(stored_rows):
+        lk = row["key"].lower()
+        if lk in idx_by_key:
+            merged[idx_by_key[lk]] = row
+        else:
+            idx_by_key[lk] = len(merged)
+            merged.append(row)
+
+    deadline_val = ""
+    time_idx = None
+    for i, row in enumerate(merged):
+        lk = str(row.get("key", "")).strip().lower()
+        if lk == "deadline":
+            deadline_val = str(row.get("value", "") or "").strip()
+        if lk == "time remaining":
+            time_idx = i
+    if deadline_val:
+        tr = _time_remaining_from_text(deadline_val)
+        if time_idx is None:
+            merged.append({"key": "Time Remaining", "value": tr})
+        else:
+            merged[time_idx] = {"key": "Time Remaining", "value": tr}
+    return merged
+
+
+def _value_from_tender_rows(rows, key_name):
+    target = str(key_name or "").strip().lower()
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        k = str(row.get("key", "") or "").strip().lower()
+        if k == target:
+            return str(row.get("value", "") or "").strip()
+    return ""
+
+
+def _apply_tender_info_to_project(project_id, rows):
+    pid = int(project_id or 0)
+    if pid <= 0:
+        return
+    tender_id = _value_from_tender_rows(rows, "Tender ID")
+    name_of_work = _value_from_tender_rows(rows, "Name of Work")
+    client = _value_from_tender_rows(rows, "Client")
+    value = _value_from_tender_rows(rows, "Value")
+    prebid = _value_from_tender_rows(rows, "Prebid")
+    deadline = _value_from_tender_rows(rows, "Deadline")
+    name_of_work = " ".join(str(name_of_work or "").split())
+    conn = sqlite3.connect(core.DB_FILE)
+    try:
+        conn.execute(
+            "UPDATE projects SET source_tender_id=?, description=?, client_name=?, project_value=?, prebid=?, deadline=? WHERE id=?",
+            (
+                tender_id or None,
+                name_of_work,
+                client,
+                value,
+                prebid,
+                deadline,
+                pid,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _open_tender_info_editor(parent, rows, title="Edit Tender Info"):
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.resize(760, 460)
+    root = QVBoxLayout(dlg)
+    root.setContentsMargins(12, 10, 12, 10)
+    root.setSpacing(8)
+    root.addWidget(QLabel("Edit tender fields/values. Double-click a cell to edit."))
+
+    table = QTableWidget(0, 2, dlg)
+    table.setHorizontalHeaderLabels(["Field", "Value"])
+    table.setSelectionBehavior(QAbstractItemView.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
+    table.horizontalHeader().setStretchLastSection(True)
+    table.setColumnWidth(0, 220)
+    table.verticalHeader().setVisible(False)
+    root.addWidget(table, 1)
+
+    def add_row(field_txt="", value_txt=""):
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setItem(r, 0, QTableWidgetItem(str(field_txt or "")))
+        table.setItem(r, 1, QTableWidgetItem(str(value_txt or "")))
+
+    for row in (rows or []):
+        add_row(str(row.get("key", "")), str(row.get("value", "")))
+
+    tools = QHBoxLayout()
+    add_btn = QPushButton("Add")
+    del_btn = QPushButton("Delete")
+    tools.addWidget(add_btn)
+    tools.addWidget(del_btn)
+    tools.addStretch(1)
+    root.addLayout(tools)
+
+    def on_add():
+        add_row("", "")
+        table.setCurrentCell(table.rowCount() - 1, 0)
+        table.editItem(table.item(table.rowCount() - 1, 0))
+
+    def on_delete():
+        row = table.currentRow()
+        if row < 0:
+            return
+        table.removeRow(row)
+
+    add_btn.clicked.connect(on_add)
+    del_btn.clicked.connect(on_delete)
+
+    btns = QHBoxLayout()
+    ok_btn = QPushButton("Save")
+    ok_btn.setObjectName("PrimaryButton")
+    cancel_btn = QPushButton("Cancel")
+    btns.addStretch(1)
+    btns.addWidget(ok_btn)
+    btns.addWidget(cancel_btn)
+    root.addLayout(btns)
+
+    out = {"rows": None}
+
+    def on_save():
+        # Ensure active in-cell editor commits text before reading table items.
+        fw = QApplication.focusWidget()
+        if fw is not None:
+            fw.clearFocus()
+        table.setFocus()
+        QApplication.processEvents()
+        merged = []
+        for r in range(table.rowCount()):
+            key_item = table.item(r, 0)
+            val_item = table.item(r, 1)
+            key_txt = str(key_item.text() if key_item else "").strip()
+            val_txt = str(val_item.text() if val_item else "").strip()
+            if key_txt and val_txt:
+                merged.append({"key": key_txt, "value": val_txt})
+        out["rows"] = merged
+        dlg.accept()
+
+    ok_btn.clicked.connect(on_save)
+    cancel_btn.clicked.connect(dlg.reject)
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    return out["rows"] if isinstance(out["rows"], list) else []
 
 
 class TrapezoidToggleButton(QPushButton):
@@ -1131,23 +1459,28 @@ class ProjectsPage(QWidget):
         self.new_btn.setObjectName("PrimaryButton")
         self.open_btn = QPushButton("Open Project")
         self.open_btn.setObjectName("AccentBlueButton")
+        self.edit_tender_info_btn = QPushButton("Edit")
+        self.edit_tender_info_btn.setObjectName("SecondaryButton")
         self.delete_btn = QPushButton("Delete Project")
         self.delete_btn.setObjectName("DangerButton")
 
         self.new_btn.clicked.connect(self.open_create_project)
         self.open_btn.clicked.connect(self.open_selected)
+        self.edit_tender_info_btn.clicked.connect(self.edit_selected_project_tender_info)
         self.delete_btn.clicked.connect(self.delete_selected)
-        for b in (self.new_btn, self.open_btn, self.delete_btn):
+        for b in (self.new_btn, self.open_btn, self.edit_tender_info_btn, self.delete_btn):
             b.setProperty("compact", True)
             b.setFixedHeight(34)
         self.new_btn.setMinimumWidth(126)
         self.open_btn.setMinimumWidth(118)
+        self.edit_tender_info_btn.setMinimumWidth(132)
         self.delete_btn.setMinimumWidth(122)
 
         bar.addWidget(self.search_edit, 1)
         bar.addWidget(self.new_btn)
         bar.addStretch(1)
         bar.addWidget(self.open_btn)
+        bar.addWidget(self.edit_tender_info_btn)
         bar.addWidget(self.delete_btn)
         play.addLayout(bar)
 
@@ -1570,6 +1903,27 @@ class ProjectsPage(QWidget):
         pids = self._selected_project_ids()
         return pids[0] if pids else None
 
+    def edit_selected_project_tender_info(self):
+        pid = self._selected_single_project_id()
+        if not pid:
+            QMessageBox.information(self, "Edit", "Select one project first.")
+            return
+        base_rows = _collect_project_tender_base_info(pid)
+        stored_rows = _load_project_tender_info(pid)
+        rows = _merge_tender_info_rows(base_rows, stored_rows)
+        updated = _open_tender_info_editor(self, rows, title="Edit")
+        if updated is None:
+            return
+        _save_project_tender_info(pid, updated)
+        _apply_tender_info_to_project(pid, updated)
+        self.load_projects()
+        try:
+            details_page = getattr(self.controller, "project_details_page", None)
+            if details_page is not None and int(getattr(details_page, "project_id", 0) or 0) == int(pid):
+                details_page.refresh_tender_meta()
+        except Exception:
+            pass
+
     def _load_selected_into_form(self):
         pid = self._selected_single_project_id()
         if not pid:
@@ -1923,10 +2277,24 @@ class ProjectDetailsPage(QWidget):
         self._preview_visible = False
         self._preview_target_width = 520
         self._preview_toggle_manual_y = 440
+        self._preview_toggle_y_offset = 24
+        self._tender_meta_min_top_height = 76
+        self._tender_meta_max_rows = 6
+        self._tender_meta_row_height = 24
+        self._tender_meta_controls_min_height = 88
+        self._tender_meta_controls_max_height = 140
+        self._tender_splitter_updating = False
+        self._tender_meta_auto_top_height = self._tender_meta_min_top_height
+        self._show_tender_info = True
         self._project_table_user_layout = False
         self._project_table_restoring_layout = False
         self._left_box = None
         self.body_splitter = None
+        self._current_deadline_text = ""
+        self._tender_countdown_timer = QTimer(self)
+        self._tender_countdown_timer.setInterval(1000)
+        self._tender_countdown_timer.timeout.connect(self._update_tender_countdown_label)
+        self._tender_countdown_timer.start()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1955,14 +2323,57 @@ class ProjectDetailsPage(QWidget):
         root.addWidget(top_bar)
 
         checklist_panel = QFrame()
+        self.checklist_panel = checklist_panel
         checklist_panel.setObjectName("ChecklistPanel")
         checklist_layout = QVBoxLayout(checklist_panel)
-        checklist_layout.setContentsMargins(10, 8, 10, 8)
-        checklist_layout.setSpacing(8)
-        checklist_layout.addWidget(QLabel("Manage Document Checklist"))
+        self.checklist_layout = checklist_layout
+        checklist_layout.setContentsMargins(5, 0, 5, 8)
+        checklist_layout.setSpacing(0)
+
+        tender_meta_top = QHBoxLayout()
+        tender_meta_top.setContentsMargins(0, 0, 0, 1)
+        tender_meta_top.setSpacing(4)
+        tender_meta_top.addStretch(1)
+        self.tender_countdown_lbl = QLabel("Time Remaining: -")
+        self.tender_countdown_lbl.setObjectName("TenderCountdownLabel")
+        self.edit_tender_info_btn = QPushButton("Add/Edit Info")
+        self.edit_tender_info_btn.setProperty("compact", True)
+        self.edit_tender_info_btn.setProperty("legacyProjectButton", True)
+        tender_meta_top.addWidget(self.tender_countdown_lbl)
+        tender_meta_top.addWidget(self.edit_tender_info_btn)
+        checklist_layout.addLayout(tender_meta_top)
+
+        self.tender_meta_wrap = QWidget()
+        self.tender_meta_wrap_layout = QVBoxLayout(self.tender_meta_wrap)
+        self.tender_meta_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        self.tender_meta_wrap_layout.setSpacing(2)
+        self.tender_meta_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        checklist_layout.addWidget(self.tender_meta_wrap)
+
+        self.tender_meta_view = QTextBrowser()
+        self.tender_meta_view.setOpenLinks(False)
+        self.tender_meta_view.setOpenExternalLinks(False)
+        self.tender_meta_view.setMinimumHeight(76)
+        self.tender_meta_view.setMaximumHeight(16777215)
+        self.tender_meta_view.setPlaceholderText("Tender details will appear here.")
+        self.tender_meta_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tender_meta_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tender_meta_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tender_meta_view.installEventFilter(self)
+        self.tender_meta_wrap_layout.addWidget(self.tender_meta_view)
+
+        checklist_controls = QWidget()
+        self.checklist_controls_widget = checklist_controls
+        checklist_controls_layout = QVBoxLayout(checklist_controls)
+        self.checklist_controls_layout = checklist_controls_layout
+        checklist_controls_layout.setContentsMargins(0, 2, 0, 0)
+        checklist_controls_layout.setSpacing(2)
+        checklist_controls_layout.setAlignment(Qt.AlignTop)
+        self.tender_meta_wrap_layout.addWidget(checklist_controls)
 
         form = QHBoxLayout()
-        form.setSpacing(8)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(4)
         self.doc_name_edit = QLineEdit()
         self.doc_name_edit.setPlaceholderText("Document Name")
         self.doc_name_edit.setMaximumWidth(280)
@@ -1979,11 +2390,9 @@ class ProjectDetailsPage(QWidget):
         form.addWidget(self.desc_edit, 1)
         form.addWidget(QLabel("Location (Folder):"))
         form.addWidget(self.folder_combo, 0)
-        checklist_layout.addLayout(form)
-
         actions = QHBoxLayout()
-        actions.setSpacing(10)
-        actions.setContentsMargins(0, 2, 0, 0)
+        actions.setSpacing(5)
+        actions.setContentsMargins(0, 0, 0, 0)
         self.add_btn = QPushButton("Add Item")
         self.add_btn.setObjectName("ProjectAddButton")
         self.update_btn = QPushButton("Update")
@@ -2039,7 +2448,8 @@ class ProjectDetailsPage(QWidget):
         self.back_btn.setProperty("legacyProjectTopButton", True)
         self.sync_btn.setProperty("legacyProjectTopButton", True)
         self.open_explorer_btn.setProperty("legacyProjectTopButton", True)
-        checklist_layout.addLayout(actions)
+        checklist_controls_layout.addLayout(form)
+        checklist_controls_layout.addLayout(actions)
         root.addWidget(checklist_panel)
 
         self.table = QTableWidget(0, len(self.headers))
@@ -2050,6 +2460,7 @@ class ProjectDetailsPage(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setColumnHidden(5, True)
         self.table.setColumnHidden(6, True)
@@ -2126,6 +2537,7 @@ class ProjectDetailsPage(QWidget):
         self.import_templates_btn.clicked.connect(self.import_templates_to_project)
         self.save_template_btn.clicked.connect(self.save_checklist_as_template)
         self.download_btn.clicked.connect(self.check_for_corrigendum)
+        self.edit_tender_info_btn.clicked.connect(self.edit_tender_info)
         self.attach_btn.clicked.connect(self.upload_file)
         self.open_file_btn.clicked.connect(self.open_file)
         self.delete_btn.clicked.connect(self.delete_item)
@@ -2136,6 +2548,9 @@ class ProjectDetailsPage(QWidget):
         self.body_splitter.installEventFilter(self)
         self.preview_box.installEventFilter(self)
         self._load_preview_splitter_sizes()
+        self.apply_tender_info_visibility_setting()
+        self._update_tender_meta_auto_height()
+        self._apply_tender_meta_compact_layout()
         self._set_preview_visible(False, animate=False)
         self._adjust_checklist_column_widths()
         QTimer.singleShot(0, self._position_preview_toggle)
@@ -2185,6 +2600,9 @@ class ProjectDetailsPage(QWidget):
             conn.close()
 
         self.refresh_folder_list()
+        self.refresh_tender_meta()
+        self.apply_tender_info_visibility_setting()
+        self._apply_tender_meta_compact_layout()
         self._fill_items(items)
         if self._restore_project_table_layout():
             self._project_table_user_layout = True
@@ -2379,6 +2797,34 @@ class ProjectDetailsPage(QWidget):
     def _settings_key_preview_splitter(self):
         return "project_details_preview_splitter_sizes"
 
+    def _settings_key_show_tender_info(self):
+        return "project_details_show_tender_info"
+
+    def _tender_meta_max_top_height(self):
+        return max(self._tender_meta_min_top_height, int(self._tender_meta_max_rows * self._tender_meta_row_height))
+
+    def _compute_tender_meta_auto_height(self):
+        view = getattr(self, "tender_meta_view", None)
+        if view is None:
+            return self._tender_meta_min_top_height
+        try:
+            doc = view.document()
+            if doc is None:
+                return self._tender_meta_min_top_height
+            vp = view.viewport()
+            text_w = max(220, int(vp.width()) - 8) if vp is not None else 420
+            doc.setTextWidth(float(text_w))
+            content_h = int(doc.size().height()) + 12
+        except Exception:
+            content_h = self._tender_meta_min_top_height
+        content_h = max(self._tender_meta_min_top_height, content_h)
+        content_h = min(content_h, self._tender_meta_max_top_height())
+        return int(content_h)
+
+    def _update_tender_meta_auto_height(self):
+        self._tender_meta_auto_top_height = self._compute_tender_meta_auto_height()
+        self._apply_tender_meta_compact_layout()
+
     def _save_preview_splitter_sizes(self):
         if not self.body_splitter:
             return
@@ -2397,6 +2843,30 @@ class ProjectDetailsPage(QWidget):
         self.body_splitter.setSizes([980, 0])
         self.preview_side_btn.setText("<")
 
+    def _apply_tender_meta_compact_layout(self):
+        if not getattr(self, "tender_meta_view", None):
+            return
+        if not getattr(self, "checklist_controls_widget", None):
+            return
+        try:
+            top_h = int(self._tender_meta_auto_top_height or self._tender_meta_min_top_height)
+            top_h = max(self._tender_meta_min_top_height, min(top_h, self._tender_meta_max_top_height()))
+            controls_hint = int(self.checklist_controls_widget.sizeHint().height())
+            controls_h = max(self._tender_meta_controls_min_height, controls_hint + 10)
+            if not bool(getattr(self, "_show_tender_info", True)):
+                top_h = 0
+            self.tender_meta_view.setMinimumHeight(top_h)
+            self.tender_meta_view.setMaximumHeight(top_h)
+            self.checklist_controls_widget.setMinimumHeight(controls_h)
+            self.checklist_controls_widget.setMaximumHeight(controls_h)
+            total_h = top_h + controls_h + 2
+            if getattr(self, "tender_meta_wrap", None) is not None:
+                self.tender_meta_wrap.setMinimumHeight(total_h)
+                self.tender_meta_wrap.setMaximumHeight(total_h)
+                self.tender_meta_wrap.resize(self.tender_meta_wrap.width(), total_h)
+        except Exception:
+            pass
+
     def _on_preview_splitter_moved(self, *_args):
         if not self.body_splitter:
             return
@@ -2408,6 +2878,28 @@ class ProjectDetailsPage(QWidget):
         self.preview_side_btn.setText("<" if is_collapsed else ">")
         self._preview_visible = not is_collapsed
         self._adjust_checklist_column_widths()
+
+    def apply_tender_info_visibility_setting(self):
+        show = bool(core.get_user_setting(self._settings_key_show_tender_info(), True))
+        self._show_tender_info = show
+        self.tender_countdown_lbl.setVisible(show)
+        self.edit_tender_info_btn.setVisible(show)
+        self.tender_meta_view.setVisible(show)
+        if show:
+            # Ensure the view never stays clamped at 0 after being shown again.
+            self.tender_meta_view.setMinimumHeight(self._tender_meta_min_top_height)
+            self.tender_meta_view.setMaximumHeight(16777215)
+            self._tender_meta_auto_top_height = max(self._tender_meta_min_top_height, self._compute_tender_meta_auto_height())
+        if getattr(self, "checklist_controls_layout", None) is not None:
+            # More gap between input row and action row when info box is hidden.
+            self.checklist_controls_layout.setSpacing(2 if show else 6)
+            self.checklist_controls_layout.setContentsMargins(0, 2 if show else 0, 0, 0)
+        if getattr(self, "checklist_layout", None) is not None:
+            # Keep a bit more room below controls for full action-row visibility.
+            self.checklist_layout.setContentsMargins(5, 0, 5, 8 if show else 10)
+        self._apply_tender_meta_compact_layout()
+        if show:
+            QTimer.singleShot(0, self._update_tender_meta_auto_height)
 
     def toggle_preview_panel(self):
         if not self.body_splitter:
@@ -2463,7 +2955,12 @@ class ProjectDetailsPage(QWidget):
         bw = self.preview_side_btn.width()
         bh = self.preview_side_btn.height()
         bx = self.body_splitter.x() + int(sizes[0]) - (bw // 2)
-        by = int(getattr(self, "_preview_toggle_manual_y", 440))
+        by = self.body_splitter.y() + max(0, (self.body_splitter.height() - bh) // 2)
+        table = getattr(self, "table", None)
+        if table is not None and table.viewport() is not None:
+            vp = table.viewport()
+            vp_top_left = vp.mapTo(self, QPoint(0, 0))
+            by = int(vp_top_left.y() + max(0, (vp.height() - bh) // 2) + int(self._preview_toggle_y_offset))
         max_x = max(0, self.width() - bw)
         max_y = max(0, self.height() - bh)
         bx = min(max(0, int(bx)), max_x)
@@ -2478,12 +2975,34 @@ class ProjectDetailsPage(QWidget):
         preview_label = getattr(self, "preview_label", None)
         body_splitter = getattr(self, "body_splitter", None)
         preview_box = getattr(self, "preview_box", None)
+        tender_splitter = getattr(self, "tender_meta_splitter", None)
+        tender_handle = getattr(self, "_tender_splitter_handle", None)
+        if obj is tender_handle and event.type() in (
+            QEvent.Enter,
+            QEvent.HoverMove,
+            QEvent.MouseMove,
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.CursorChange,
+        ):
+            try:
+                tender_handle.setCursor(Qt.ArrowCursor)
+            except Exception:
+                pass
+            return True
+        if obj is tender_splitter and event.type() in (QEvent.CursorChange, QEvent.HoverMove):
+            try:
+                tender_splitter.setCursor(Qt.ArrowCursor)
+            except Exception:
+                pass
         if obj is table and event.type() == QEvent.Resize:
             self._schedule_row_fit()
             self._adjust_checklist_column_widths()
             self._position_preview_toggle()
         if obj in (body_splitter, preview_box) and event.type() in (QEvent.Resize, QEvent.Move, QEvent.LayoutRequest, QEvent.Show):
             self._position_preview_toggle()
+        if obj is getattr(self, "tender_meta_view", None) and event.type() == QEvent.Resize:
+            self._update_tender_meta_auto_height()
         if obj is preview_label and event.type() == QEvent.Resize and self.current_pdf:
             self.show_pdf_page()
         return super().eventFilter(obj, event)
@@ -2491,10 +3010,11 @@ class ProjectDetailsPage(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_checklist_column_widths()
+        self._apply_tender_meta_compact_layout()
         self._position_preview_toggle()
 
     def refresh_folder_list(self):
-        folder_list = ["Main"]
+        folder_list = []
         try:
             for root, dirs, _ in os.walk(self.folder_path):
                 for d in dirs:
@@ -2502,17 +3022,159 @@ class ProjectDetailsPage(QWidget):
                     rel_path = os.path.relpath(full_path, self.folder_path)
                     folder_list.append(rel_path)
         except Exception:
-            folder_list = ["Main"]
+            folder_list = []
 
         current = self.folder_combo.currentText().strip() or "Main"
         self.folder_combo.clear()
-        values = sorted(set(folder_list), key=lambda x: x.lower())
+        values = [v for v in sorted(set(folder_list), key=lambda x: x.lower()) if self._normalize_subfolder(v) != "Main"]
         self.folder_combo.addItems(values)
         idx = self.folder_combo.findText(current)
         if idx >= 0:
             self.folder_combo.setCurrentIndex(idx)
         elif self.folder_combo.count():
             self.folder_combo.setCurrentIndex(0)
+
+    def _load_extra_info_pairs(self):
+        return _load_project_tender_info(getattr(self, "project_id", 0) or 0)
+
+    def _save_extra_info_pairs(self, items):
+        _save_project_tender_info(getattr(self, "project_id", 0) or 0, items)
+
+    def _parse_deadline_datetime(self, raw):
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        fmts = [
+            "%d-%m-%Y %I:%M %p",
+            "%d-%m-%Y %H:%M",
+            "%d-%m-%Y",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+        ]
+        for fmt in fmts:
+            try:
+                return datetime.datetime.strptime(txt, fmt)
+            except Exception:
+                continue
+        return None
+
+    def _time_remaining_text(self, deadline_text):
+        dt = self._parse_deadline_datetime(deadline_text)
+        if dt is None:
+            return "-"
+        now = datetime.datetime.now()
+        delta = dt - now
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            return "Expired"
+        days = secs // 86400
+        hours = (secs % 86400) // 3600
+        mins = (secs % 3600) // 60
+        if days > 0:
+            return f"{days}d {hours}h {mins}m"
+        if hours > 0:
+            return f"{hours}h {mins}m"
+        return f"{mins}m"
+
+    def _live_tender_countdown_text(self, deadline_text):
+        dt = self._parse_deadline_datetime(deadline_text)
+        if dt is None:
+            return "-"
+        now = datetime.datetime.now()
+        total = int((dt - now).total_seconds())
+        if total <= 0:
+            return "Expired"
+        days = total // 86400
+        rem = total % 86400
+        hours = rem // 3600
+        rem %= 3600
+        mins = rem // 60
+        secs = rem % 60
+        day_label = "Day" if days == 1 else "Days"
+        return f"{days} {day_label}, {hours:02d}:{mins:02d}:{secs:02d}"
+
+    def _update_tender_countdown_label(self):
+        text = self._live_tender_countdown_text(getattr(self, "_current_deadline_text", ""))
+        self.tender_countdown_lbl.setText(f"Time Remaining: {text}")
+
+    def _render_tender_meta_rows(self, rows):
+        tr = []
+        for key, val in rows:
+            k = html.escape(str(key or ""))
+            v = html.escape(str(val or "-"))
+            tr.append(
+                "<tr>"
+                f"<td style='width:180px; vertical-align:top; color:#234; font-weight:600; padding:1px 8px 1px 0;'>{k}</td>"
+                f"<td style='vertical-align:top; color:#111; padding:1px 0; white-space:normal; word-break:break-word;'>{v}</td>"
+                "</tr>"
+            )
+        doc = (
+            "<html><body style='margin:0; font-family:Segoe UI, Arial, sans-serif; font-size:9.5pt;'>"
+            "<table style='width:100%; border-collapse:collapse;'>"
+            + "".join(tr)
+            + "</table></body></html>"
+        )
+        self.tender_meta_view.setHtml(doc)
+        QTimer.singleShot(0, self._update_tender_meta_auto_height)
+
+    def refresh_tender_meta(self):
+        base_rows = _collect_project_tender_base_info(getattr(self, "project_id", 0) or 0)
+        stored_rows = self._load_extra_info_pairs()
+        merged_rows = _merge_tender_info_rows(base_rows, stored_rows)
+        self._current_deadline_text = _value_from_tender_rows(merged_rows, "Deadline")
+        self._update_tender_countdown_label()
+        view_rows = []
+        for row in merged_rows:
+            key = str(row.get("key", "") or "").strip()
+            val = str(row.get("value", "") or "").strip()
+            if key:
+                if key.lower() == "name of work":
+                    val = " ".join(val.split())
+                if key.lower() != "time remaining":
+                    view_rows.append((key, val or "-"))
+        self._tender_meta_max_rows = 6
+        self._render_tender_meta_rows(view_rows)
+
+    def add_tender_info(self):
+        if not self.project_id:
+            return
+        key, ok = QInputDialog.getText(self, "Add Info", "Field name:")
+        if not ok:
+            return
+        key = str(key or "").strip()
+        if not key:
+            return
+        val, ok = QInputDialog.getText(self, "Add Info", "Field value:")
+        if not ok:
+            return
+        val = str(val or "").strip()
+        if not val:
+            return
+        rows = self._load_extra_info_pairs()
+        rows.append({"key": key, "value": val})
+        self._save_extra_info_pairs(rows)
+        self.refresh_tender_meta()
+
+    def edit_tender_info(self):
+        if not self.project_id:
+            return
+        base_rows = _collect_project_tender_base_info(self.project_id)
+        stored_rows = self._load_extra_info_pairs()
+        rows = _merge_tender_info_rows(base_rows, stored_rows)
+        updated = _open_tender_info_editor(self, rows, title="Edit Info")
+        if updated is None:
+            return
+        self._save_extra_info_pairs(updated)
+        _apply_tender_info_to_project(self.project_id, updated)
+        self.source_tender_id = _value_from_tender_rows(updated, "Tender ID")
+        self.refresh_tender_meta()
+        try:
+            ppage = getattr(self.controller, "projects_page", None)
+            if ppage is not None:
+                ppage.load_projects()
+        except Exception:
+            pass
 
     def _selected_row(self):
         rows = self.table.selectionModel().selectedRows()
@@ -3611,6 +4273,8 @@ class ViewTendersPage(QWidget):
         self.backend = getattr(controller, "scraper_backend", None) or BackendModeScraperProxy()
         self._task_executor = ThreadPoolExecutor(max_workers=1)
         self._task_future = None
+        self._auto_fetch_timer = QTimer(self)
+        self._auto_fetch_timer.timeout.connect(self._run_auto_fetch_cycle)
         self.quick_search_map = {
             "orgs": core.get_user_setting("viewtenders_search_orgs", self.backend.get_setting("viewtenders_search_orgs", "")) or "",
             "tenders": core.get_user_setting("viewtenders_search_tenders", self.backend.get_setting("viewtenders_search_tenders", "")) or "",
@@ -3847,7 +4511,12 @@ class ViewTendersPage(QWidget):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self._restore_last_tab()
 
+        try:
+            self.backend.sync_remote_state()
+        except Exception as e:
+            core.log_to_gui(f"Remote state sync skipped: {e}")
         self.refresh_sites()
+        self.refresh_auto_fetch_settings()
         self.on_tab_changed(self.tabs.currentIndex())
 
     def _load_json_setting(self, key, default):
@@ -3915,8 +4584,10 @@ class ViewTendersPage(QWidget):
         tbl.setWordWrap(True)
         tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         tbl.horizontalHeader().setSectionsMovable(True)
+        tbl.horizontalHeader().setSectionsClickable(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        tbl.horizontalHeader().setSortIndicatorShown(False)
         tbl.horizontalHeader().sectionResized.connect(lambda *_args, t=tbl: self._schedule_table_reflow(t))
         if table_key:
             tbl.horizontalHeader().sectionResized.connect(lambda *_args, k=table_key: self._schedule_column_width_persist(k))
@@ -4107,6 +4778,27 @@ class ViewTendersPage(QWidget):
             self.load_tender_table()
         elif key == "archived":
             self.load_archived_table()
+
+    def _is_select_sort_deferred(self, table_key):
+        state = self.sort_map.get(table_key, {}) or {}
+        return str(state.get("column") or "") == "Select"
+
+    def _update_visible_select_values(self, table, cols, updates_by_id):
+        if table is None or not updates_by_id or "Select" not in cols:
+            return
+        select_idx = cols.index("Select")
+        for row in range(table.rowCount()):
+            id_item = table.item(row, 1)
+            if not id_item:
+                continue
+            row_id = str(id_item.text() or "").strip()
+            if row_id not in updates_by_id:
+                continue
+            item = table.item(row, select_idx)
+            if item is None:
+                item = QTableWidgetItem("")
+                table.setItem(row, select_idx, item)
+            item.setText(str(updates_by_id[row_id]))
 
     def _show_table_context_menu(self, key, table, pos):
         menu = QMenu(self)
@@ -4661,8 +5353,13 @@ class ViewTendersPage(QWidget):
         conn.execute("UPDATE organizations SET is_selected=? WHERE id=?", (target, org_id))
         conn.commit()
         conn.close()
-        self.load_org_table()
-        self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
+        if self._is_select_sort_deferred("orgs"):
+            select_item = self.table_orgs.item(row, select_idx)
+            if select_item is not None:
+                select_item.setText("Yes" if target else "No")
+        else:
+            self.load_org_table()
+            self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
 
     def _selected_tender_db_id(self, archived=False):
         table = self.table_archived if archived else self.table_tenders
@@ -4702,8 +5399,14 @@ class ViewTendersPage(QWidget):
             conn.execute("UPDATE tenders SET is_downloaded=? WHERE id=?", (target, db_id))
             conn.commit()
             conn.close()
-            self.refresh_current_table_view()
-            self._restore_selected_row_ids(table, keep_ids, 1)
+            table_key = "archived" if archived else "tenders"
+            if self._is_select_sort_deferred(table_key):
+                select_item = table.item(row, select_idx)
+                if select_item is not None:
+                    select_item.setText("Yes" if target else "No")
+            else:
+                self.refresh_current_table_view()
+                self._restore_selected_row_ids(table, keep_ids, 1)
             return
 
         if col_name == "Download":
@@ -4737,8 +5440,15 @@ class ViewTendersPage(QWidget):
         conn.commit()
         conn.close()
         keep_ids = [str(org_id) for _target, org_id in updates]
-        self.load_org_table()
-        self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
+        if self._is_select_sort_deferred("orgs"):
+            self._update_visible_select_values(
+                self.table_orgs,
+                self.org_cols,
+                {str(org_id): ("Yes" if target else "No") for target, org_id in updates},
+            )
+        else:
+            self.load_org_table()
+            self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
         return True
 
     def _toggle_selected_tender_rows(self, table, cols):
@@ -4766,8 +5476,16 @@ class ViewTendersPage(QWidget):
         conn.commit()
         conn.close()
         keep_ids = [str(db_id) for _target, db_id in updates]
-        self.refresh_current_table_view()
-        self._restore_selected_row_ids(table, keep_ids, 1)
+        table_key = "archived" if table is self.table_archived else "tenders"
+        if self._is_select_sort_deferred(table_key):
+            self._update_visible_select_values(
+                table,
+                cols,
+                {str(db_id): ("Yes" if target else "No") for target, db_id in updates},
+            )
+        else:
+            self.refresh_current_table_view()
+            self._restore_selected_row_ids(table, keep_ids, 1)
         return True
 
     def eventFilter(self, obj, event):
@@ -4865,11 +5583,13 @@ class ViewTendersPage(QWidget):
             return False
         return False
 
-    def _run_bg(self, worker_fn, done_refresh=True):
+    def _run_bg(self, worker_fn, done_refresh=True, switch_to_logs=True):
         if self._task_future and not self._task_future.done():
-            QMessageBox.information(self, "Busy", "Another scraper task is already running.")
+            if switch_to_logs:
+                QMessageBox.information(self, "Busy", "Another scraper task is already running.")
             return
-        self.tabs.setCurrentIndex(3)
+        if switch_to_logs:
+            self.tabs.setCurrentIndex(3)
         self._task_future = self._task_executor.submit(worker_fn)
         if done_refresh:
             QTimer.singleShot(300, self._poll_bg_task)
@@ -4887,8 +5607,84 @@ class ViewTendersPage(QWidget):
         self._task_future = None
         self.on_site_changed()
 
+    def _sync_remote_scraper_state_if_needed(self):
+        try:
+            if hasattr(self.backend, "push_local_state"):
+                self.backend.push_local_state()
+        except Exception as e:
+            core.log_to_gui(f"Remote state push failed: {e}")
+
+    def refresh_auto_fetch_settings(self):
+        enabled = bool(core.get_user_setting("scraper_auto_fetch_enabled", False))
+        try:
+            minutes = int(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or "30").strip())
+        except Exception:
+            minutes = 30
+        minutes = max(1, min(24 * 60, minutes))
+        if enabled:
+            self._auto_fetch_timer.start(minutes * 60 * 1000)
+        else:
+            self._auto_fetch_timer.stop()
+
+    def _mark_auto_fetch_run(self):
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        core.set_user_setting("scraper_last_auto_fetch_at", stamp)
+        def _refresh_label():
+            if hasattr(self.controller, "settings_page") and self.controller.settings_page is not None:
+                try:
+                    self.controller.settings_page.scraper_last_auto_fetch_label.setText(
+                        self.controller.settings_page._format_last_auto_fetch_text()
+                    )
+                except Exception:
+                    pass
+        QTimer.singleShot(0, _refresh_label)
+
+    def _run_auto_fetch_cycle(self):
+        if self._task_future and not self._task_future.done():
+            return
+
+        def site_has_selected_orgs(site_id):
+            conn = sqlite3.connect(core.DB_FILE)
+            try:
+                row = conn.execute(
+                    """SELECT COUNT(*)
+                       FROM organizations
+                       WHERE website_id=?
+                         AND COALESCE(is_selected,0)=1""",
+                    (site_id,),
+                ).fetchone()
+                return int((row[0] if row else 0) or 0) > 0
+            finally:
+                conn.close()
+
+        def worker():
+            target_sites = self.get_target_site_ids()
+            if not target_sites:
+                core.log_to_gui("Auto fetch skipped: no websites configured.")
+                self._mark_auto_fetch_run()
+                return
+            self._sync_remote_scraper_state_if_needed()
+            core.log_to_gui("Auto fetch started for selected organizations and tenders.")
+            for sid in target_sites:
+                self.backend.fetch_organisations_logic(sid)
+            eligible_sites = [sid for sid in target_sites if site_has_selected_orgs(sid)]
+            if not eligible_sites:
+                core.log_to_gui("Auto fetch skipped tender refresh: no organizations selected.")
+                self._mark_auto_fetch_run()
+                return
+            for sid in eligible_sites:
+                self.backend.fetch_tenders_logic(sid)
+            core.log_to_gui("Auto fetch completed.")
+            self._mark_auto_fetch_run()
+
+        self._run_bg(worker, done_refresh=True, switch_to_logs=False)
+
+    def run_auto_fetch_now(self):
+        self._run_auto_fetch_cycle()
+
     def run_fetch_orgs(self):
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.fetch_organisations_logic(sid)
         self._run_bg(worker)
@@ -4909,6 +5705,7 @@ class ViewTendersPage(QWidget):
                 conn.close()
 
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_selected_orgs(sid)]
             if not eligible_sites:
                 core.log_to_gui("No organizations selected. Please select organizations first.")
@@ -4934,6 +5731,7 @@ class ViewTendersPage(QWidget):
                 conn.close()
 
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_marked_tenders(sid)]
             if not eligible_sites:
                 core.log_to_gui("No tenders marked for download.")
@@ -4945,12 +5743,14 @@ class ViewTendersPage(QWidget):
     def run_status_check(self):
         archived_mode = (self.tabs.currentIndex() == 2)
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.check_tender_status_logic(sid, archived_only=archived_mode)
         self._run_bg(worker)
 
     def run_download_results(self):
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.download_tender_results_logic(sid)
         self._run_bg(worker)
@@ -4968,6 +5768,7 @@ class ViewTendersPage(QWidget):
             return
 
         def worker():
+            self._sync_remote_scraper_state_if_needed()
             self.backend.download_single_tender_logic(tender_db_id, mode)
         self._run_bg(worker)
 
@@ -5024,7 +5825,18 @@ class ViewTendersPage(QWidget):
         conn.execute(f"UPDATE tenders SET is_downloaded=? WHERE {where_sql}", (target, *params))
         conn.commit()
         conn.close()
-        self.on_site_changed()
+        table = self.table_archived if archived_mode else self.table_tenders
+        cols = self.archived_cols if archived_mode else self.tender_cols
+        table_key = "archived" if archived_mode else "tenders"
+        if self._is_select_sort_deferred(table_key):
+            visible_updates = {}
+            for row in range(table.rowCount()):
+                id_item = table.item(row, 1)
+                if id_item:
+                    visible_updates[str(id_item.text() or "").strip()] = "Yes" if target else "No"
+            self._update_visible_select_values(table, cols, visible_updates)
+        else:
+            self.on_site_changed()
 
     def manage_websites_dialog(self):
         dlg = QDialog(self)
@@ -5881,7 +6693,7 @@ class ViewTendersPage(QWidget):
             if not path:
                 return
             try:
-                import pandas as pd
+                pd = importlib.import_module("pandas")
             except Exception:
                 QMessageBox.critical(self, "Export Excel", "Pandas is not available. Install pandas/openpyxl.")
                 return
@@ -6085,13 +6897,28 @@ class AppSettingsPage(QWidget):
         self.projects_dir_edit = QLineEdit()
         self.download_dir_edit = QLineEdit()
         self.update_dir_edit = QLineEdit()
+        self.update_manifest_url_edit = QLineEdit()
         self.backend_mode_combo = QComboBox()
+        self.backend_mode_combo.addItem("Local", "local")
+        self.backend_mode_combo.addItem("Remote (Railway/API)", "remote")
+        if FRONTEND_REMOTE_ONLY:
+            self.backend_mode_combo.setCurrentIndex(1)
+            self.backend_mode_combo.setEnabled(False)
         self.backend_url_edit = QLineEdit()
         self.backend_api_key_edit = QLineEdit()
         self.backend_api_key_edit.setEchoMode(QLineEdit.Password)
         self.test_backend_btn = QPushButton("Test Backend")
         self.backend_test_status = QLabel("")
         self.backend_test_status.setObjectName("SoftText")
+        self.backend_test_status.setWordWrap(True)
+        self.backend_test_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.show_tender_info_chk = QCheckBox("Show tender info box in Project Details")
+        self.scraper_auto_fetch_chk = QCheckBox("Enable auto fetch for selected organizations and tenders")
+        self.scraper_auto_fetch_interval_edit = QLineEdit()
+        self.scraper_auto_fetch_interval_edit.setPlaceholderText("Minutes")
+        self.scraper_last_auto_fetch_label = QLabel("")
+        self.scraper_last_auto_fetch_label.setObjectName("SoftText")
+        self.scraper_run_auto_fetch_btn = QPushButton("Run Auto Fetch Now")
 
         btn_db = QPushButton("Browse")
         btn_projects = QPushButton("Browse")
@@ -6114,18 +6941,28 @@ class AppSettingsPage(QWidget):
         form.addWidget(self.update_dir_edit, 3, 1)
         form.addWidget(btn_update_dir, 3, 2)
 
-        self.backend_mode_combo.addItems(["Local", "Remote (Railway/API)"])
-        form.addWidget(QLabel("Backend Mode:"), 4, 0)
-        form.addWidget(self.backend_mode_combo, 4, 1)
+        form.addWidget(QLabel("Update Manifest URL:"), 4, 0)
+        form.addWidget(self.update_manifest_url_edit, 4, 1, 1, 2)
 
-        form.addWidget(QLabel("Backend URL:"), 5, 0)
-        form.addWidget(self.backend_url_edit, 5, 1)
+        form.addWidget(QLabel("Backend Mode:"), 5, 0)
+        form.addWidget(self.backend_mode_combo, 5, 1, 1, 2)
 
-        form.addWidget(QLabel("Backend API Key:"), 6, 0)
-        form.addWidget(self.backend_api_key_edit, 6, 1)
-        form.addWidget(self.test_backend_btn, 6, 2)
+        form.addWidget(QLabel("Backend URL:"), 6, 0)
+        form.addWidget(self.backend_url_edit, 6, 1, 1, 2)
 
-        form.addWidget(self.backend_test_status, 7, 1, 1, 2)
+        form.addWidget(QLabel("Backend API Key:"), 7, 0)
+        form.addWidget(self.backend_api_key_edit, 7, 1)
+        form.addWidget(self.test_backend_btn, 7, 2)
+
+        form.addWidget(self.backend_test_status, 8, 1, 1, 2)
+        form.addWidget(self.show_tender_info_chk, 9, 1, 1, 2)
+        form.addWidget(QLabel("Online Tender Scraping:"), 10, 0)
+        form.addWidget(self.scraper_auto_fetch_chk, 10, 1, 1, 2)
+        form.addWidget(QLabel("Auto Fetch Interval (minutes):"), 11, 0)
+        form.addWidget(self.scraper_auto_fetch_interval_edit, 11, 1, 1, 2)
+        form.addWidget(QLabel("Last Auto Fetch:"), 12, 0)
+        form.addWidget(self.scraper_last_auto_fetch_label, 12, 1)
+        form.addWidget(self.scraper_run_auto_fetch_btn, 12, 2)
 
         hint = QLabel(
             "Database path uses 'tender_manager.db' inside the selected DB folder. "
@@ -6176,9 +7013,14 @@ class AppSettingsPage(QWidget):
         self.install_update_btn.clicked.connect(self.install_upgrade)
         self.projects_view_toggle_btn.clicked.connect(self.toggle_projects_create_view)
         self.test_backend_btn.clicked.connect(self.test_backend_connection)
+        self.show_tender_info_chk.toggled.connect(self._on_show_tender_info_toggled)
+        self.backend_mode_combo.currentIndexChanged.connect(self._apply_backend_mode_ui)
+        self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
 
         self._pending_update_exe = ""
         self._pending_update_version = ""
+        self._pending_update_exe_url = ""
+        self._pending_update_installer_url = ""
 
         self.reload_settings()
 
@@ -6193,29 +7035,51 @@ class AppSettingsPage(QWidget):
         self.projects_dir_edit.setText(core._resolve_path(core.ROOT_FOLDER))
         self.download_dir_edit.setText(core._resolve_path(core.BASE_DOWNLOAD_DIRECTORY))
         self.update_dir_edit.setText(str(core.get_user_setting("update_directory", "") or "").strip())
+        self.update_manifest_url_edit.setText(str(core.get_user_setting("update_manifest_url", "") or "").strip())
         backend_mode = str(core.get_user_setting("backend_mode", "local") or "local").strip().lower()
-        self.backend_mode_combo.setCurrentIndex(1 if backend_mode == "remote" else 0)
+        if FRONTEND_REMOTE_ONLY:
+            backend_mode = "remote"
+        idx = self.backend_mode_combo.findData("remote" if backend_mode == "remote" else "local")
+        if idx >= 0:
+            self.backend_mode_combo.setCurrentIndex(idx)
         self.backend_url_edit.setText(str(core.get_user_setting("backend_url", "") or "").strip())
         self.backend_api_key_edit.setText(str(core.get_user_setting("backend_api_key", "") or "").strip())
-        self.backend_test_status.setText("")
+        self._set_backend_test_status("")
+        self._apply_backend_mode_ui()
         self.install_update_btn.setEnabled(False)
         self._pending_update_exe = ""
         self._pending_update_version = ""
+        self._pending_update_exe_url = ""
+        self._pending_update_installer_url = ""
         self.update_status.setText("")
         mode = str(core.get_user_setting("projects_entry_mode", "inline") or "inline").strip().lower()
         if mode not in ("inline", "popup"):
             mode = "inline"
         self.projects_view_label.setText("Inline Form" if mode == "inline" else "Minimal Popup")
         self.projects_view_toggle_btn.setText("Switch to Popup" if mode == "inline" else "Switch to Inline")
+        self.show_tender_info_chk.setChecked(bool(core.get_user_setting("project_details_show_tender_info", True)))
+        self.scraper_auto_fetch_chk.setChecked(bool(core.get_user_setting("scraper_auto_fetch_enabled", False)))
+        self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
+        self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
 
     def save_settings(self):
         db_dir = str(self.db_dir_edit.text() or "").strip()
         proj_dir = str(self.projects_dir_edit.text() or "").strip()
         down_dir = str(self.download_dir_edit.text() or "").strip()
         update_dir = str(self.update_dir_edit.text() or "").strip()
-        backend_mode = "remote" if self.backend_mode_combo.currentIndex() == 1 else "local"
+        update_manifest_url = str(self.update_manifest_url_edit.text() or "").strip()
+        backend_mode = str(self.backend_mode_combo.currentData() or "local").strip().lower()
+        if FRONTEND_REMOTE_ONLY:
+            backend_mode = "remote"
         backend_url = str(self.backend_url_edit.text() or "").strip().rstrip("/")
         backend_api_key = str(self.backend_api_key_edit.text() or "").strip()
+        show_tender_info = bool(self.show_tender_info_chk.isChecked())
+        auto_fetch_enabled = bool(self.scraper_auto_fetch_chk.isChecked())
+        try:
+            auto_fetch_minutes = int(str(self.scraper_auto_fetch_interval_edit.text() or "").strip() or "30")
+        except Exception:
+            auto_fetch_minutes = 30
+        auto_fetch_minutes = max(1, min(24 * 60, auto_fetch_minutes))
         if not db_dir or not proj_dir or not down_dir:
             QMessageBox.critical(self, "Settings", "All three paths are required.")
             return
@@ -6234,16 +7098,73 @@ class AppSettingsPage(QWidget):
             core.ROOT_FOLDER = new_root
             core.BASE_DOWNLOAD_DIRECTORY = new_down
             core.set_user_setting("update_directory", update_dir)
+            core.set_user_setting("update_manifest_url", update_manifest_url)
             core.set_user_setting("backend_mode", backend_mode)
             core.set_user_setting("backend_url", backend_url)
             core.set_user_setting("backend_api_key", backend_api_key)
+            core.set_user_setting("project_details_show_tender_info", show_tender_info)
+            core.set_user_setting("scraper_auto_fetch_enabled", auto_fetch_enabled)
+            core.set_user_setting("scraper_auto_fetch_interval_minutes", auto_fetch_minutes)
             if core._resolve_path(old_db) != core._resolve_path(core.DB_FILE):
                 core.init_db()
             if hasattr(self.controller, "projects_page") and self.controller.projects_page is not None:
                 self.controller.projects_page.reload_entry_mode()
+            if hasattr(self.controller, "project_details_page") and self.controller.project_details_page is not None:
+                self.controller.project_details_page.apply_tender_info_visibility_setting()
+            if hasattr(self.controller, "online_page") and self.controller.online_page is not None:
+                self.controller.online_page.refresh_auto_fetch_settings()
             QMessageBox.information(self, "Settings", "Paths updated successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Settings", f"Failed to save settings:\n{e}")
+
+    def _on_show_tender_info_toggled(self, checked):
+        try:
+            core.set_user_setting("project_details_show_tender_info", bool(checked))
+            if hasattr(self.controller, "project_details_page") and self.controller.project_details_page is not None:
+                self.controller.project_details_page.apply_tender_info_visibility_setting()
+        except Exception:
+            pass
+
+    def _format_last_auto_fetch_text(self):
+        raw = str(core.get_user_setting("scraper_last_auto_fetch_at", "") or "").strip()
+        if not raw:
+            return "Never"
+        try:
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%d-%b-%Y %I:%M:%S %p")
+        except Exception:
+            return raw
+
+    def _run_auto_fetch_now(self):
+        try:
+            page = self.controller._ensure_online_page()
+            page.run_auto_fetch_now()
+            self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
+        except Exception as e:
+            QMessageBox.critical(self, "Auto Fetch", f"Failed to start auto fetch:\n{e}")
+
+    def _set_backend_test_status(self, message):
+        txt = str(message or "").strip()
+        if not txt:
+            self.backend_test_status.clear()
+            return
+        wrapped = "<div style='white-space:normal; overflow-wrap:anywhere; word-break:break-word;'>%s</div>" % (
+            html.escape("\n".join(textwrap.wrap(txt, width=90, break_long_words=False, replace_whitespace=False)) or txt)
+        )
+        self.backend_test_status.setText(wrapped)
+
+    def _apply_backend_mode_ui(self):
+        mode = str(self.backend_mode_combo.currentData() or "local").strip().lower()
+        if FRONTEND_REMOTE_ONLY:
+            mode = "remote"
+        is_remote = mode == "remote"
+        self.backend_url_edit.setEnabled(is_remote)
+        self.backend_api_key_edit.setEnabled(is_remote)
+        self.test_backend_btn.setEnabled(is_remote)
+        if not is_remote:
+            self._set_backend_test_status("Local backend is enabled. Remote connectivity test is not required.")
+        elif "Local backend is enabled." in self.backend_test_status.text():
+            self._set_backend_test_status("")
 
     def toggle_projects_create_view(self):
         mode = str(core.get_user_setting("projects_entry_mode", "inline") or "inline").strip().lower()
@@ -6256,31 +7177,36 @@ class AppSettingsPage(QWidget):
         self.reload_settings()
 
     def test_backend_connection(self):
-        mode = "remote" if self.backend_mode_combo.currentIndex() == 1 else "local"
+        mode = str(self.backend_mode_combo.currentData() or "local").strip().lower()
+        if FRONTEND_REMOTE_ONLY:
+            mode = "remote"
         if mode != "remote":
-            self.backend_test_status.setText("Local mode selected.")
+            self._set_backend_test_status("Local backend is enabled. Remote connectivity test is not required.")
             return
         url = str(self.backend_url_edit.text() or "").strip().rstrip("/")
         api_key = str(self.backend_api_key_edit.text() or "").strip()
         if not url or not api_key:
-            self.backend_test_status.setText("Backend URL and API key are required.")
+            self._set_backend_test_status("Backend URL and API key are required.")
             return
         try:
             client = BidApiClient(base_url=url, api_key=api_key, timeout_seconds=25)
             health = client.health()
             if str(health.get("status") or "").lower() == "ok":
-                self.backend_test_status.setText("Connected successfully.")
+                self._set_backend_test_status("Connected successfully.")
             else:
-                self.backend_test_status.setText("Connected, but health response was unexpected.")
+                self._set_backend_test_status("Connected, but health response was unexpected.")
         except Exception as e:
-            self.backend_test_status.setText(f"Connection failed: {e}")
+            self._set_backend_test_status(f"Connection failed: {e}")
 
     def check_for_upgrade(self):
         update_dir = str(self.update_dir_edit.text() or "").strip()
-        info = core.get_local_update_info(update_dir)
+        update_manifest_url = str(self.update_manifest_url_edit.text() or "").strip()
+        info = core.get_update_info(update_dir=update_dir, manifest_url=update_manifest_url)
         self.install_update_btn.setEnabled(False)
         self._pending_update_exe = ""
         self._pending_update_version = ""
+        self._pending_update_exe_url = ""
+        self._pending_update_installer_url = ""
         if not info.get("ok"):
             self.update_status.setText(str(info.get("message", "No update information found.")))
             return
@@ -6288,14 +7214,17 @@ class AppSettingsPage(QWidget):
         available = str(info.get("available_version", ""))
         if info.get("newer"):
             self._pending_update_exe = str(info.get("exe_path", ""))
+            self._pending_update_exe_url = str(info.get("exe_url", ""))
+            self._pending_update_installer_url = str(info.get("installer_url", ""))
             self._pending_update_version = available
             self.install_update_btn.setEnabled(True)
-            self.update_status.setText(f"Upgrade available: {available} (current: {current})")
+            src = str(info.get("source", "local"))
+            self.update_status.setText(f"Upgrade available: {available} (current: {current}) [{src}]")
         else:
             self.update_status.setText(f"No upgrade found. Current build: {current}")
 
     def install_upgrade(self):
-        if not self._pending_update_exe:
+        if not self._pending_update_exe and not self._pending_update_exe_url and not self._pending_update_installer_url:
             QMessageBox.information(self, "Upgrade", "Please run 'Check for Upgrade' first.")
             return
         ans = QMessageBox.question(
@@ -6305,7 +7234,22 @@ class AppSettingsPage(QWidget):
         )
         if ans != QMessageBox.Yes:
             return
-        ok, msg = core.launch_self_update(self._pending_update_exe)
+        ok = False
+        msg = "Upgrade failed."
+        if self._pending_update_installer_url:
+            dl = core.download_remote_update_binary(self._pending_update_installer_url, suffix=".exe")
+            if not dl.get("ok"):
+                QMessageBox.critical(self, "Upgrade", str(dl.get("message", "Failed to download installer update.")))
+                return
+            ok, msg = core.launch_installer_update(str(dl.get("path", "")))
+        elif self._pending_update_exe_url:
+            dl = core.download_remote_update_binary(self._pending_update_exe_url, suffix=".exe")
+            if not dl.get("ok"):
+                QMessageBox.critical(self, "Upgrade", str(dl.get("message", "Failed to download update executable.")))
+                return
+            ok, msg = core.launch_self_update(str(dl.get("path", "")))
+        else:
+            ok, msg = core.launch_self_update(self._pending_update_exe)
         if not ok:
             QMessageBox.critical(self, "Upgrade", msg)
             return
