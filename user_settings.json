@@ -1,7 +1,7 @@
 {
   "viewtenders_selected_site": "1",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "logs",
+  "viewtenders_last_tab": "orgs",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
@@ -111,7 +111,7 @@
   "viewtenders_order_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
   "viewtenders_order_archived": "[\"Sr\", \"Website\", \"Tender ID\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Status\", \"Select\", \"Download\"]",
   "main_window_maximized": true,
-  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAQAAAHcAAAX+AAADPQAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
+  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAAAAABgAAATzAAABxAAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
   "viewtenders_search_orgs": "",
   "viewtenders_filters_tenders": "{}",
   "templates_page_column_widths": [

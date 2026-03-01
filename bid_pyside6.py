@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QSplitter,
     QTableWidget,
@@ -4346,16 +4347,20 @@ class ViewTendersPage(QWidget):
         self.btn_manage_websites = QPushButton("Manage Websites")
         self.btn_clear_data = QPushButton("Clear Data")
         self.btn_download_one = QPushButton("Download")
+        self.btn_fetch_data = QPushButton("Fetch Data")
         self.btn_manage_websites.clicked.connect(self.manage_websites_dialog)
         self.btn_clear_data.clicked.connect(self.clear_saved_details_dialog)
         self.btn_download_one.clicked.connect(self.run_single_download)
+        self.btn_fetch_data.clicked.connect(self.run_fetch_server_data)
         top_uniform_w = 112
         top_uniform_h = 29
-        for b in (self.btn_manage_websites, self.btn_download_one, self.btn_clear_data):
+        for b in (self.btn_manage_websites, self.btn_download_one, self.btn_fetch_data, self.btn_clear_data):
             b.setProperty("compact", True)
             b.setFixedHeight(top_uniform_h)
             if b is self.btn_manage_websites:
                 b.setFixedWidth(top_uniform_w + 14)
+            elif b is self.btn_fetch_data:
+                b.setFixedWidth(top_uniform_w + 8)
             else:
                 b.setFixedWidth(top_uniform_w)
         top.addWidget(QLabel("Website:"))
@@ -4364,6 +4369,7 @@ class ViewTendersPage(QWidget):
         top.addWidget(self.search_edit)
         top.addWidget(self.btn_manage_websites)
         top.addWidget(self.btn_download_one)
+        top.addWidget(self.btn_fetch_data)
         top.addStretch(1)
         top.addWidget(self.btn_clear_data)
         controls_lay.addLayout(top)
@@ -4384,6 +4390,7 @@ class ViewTendersPage(QWidget):
         self.btn_advanced = QPushButton("Advanced")
         self.btn_manage_websites.setObjectName("ScraperManageButton")
         self.btn_download_one.setObjectName("ScraperDownloadButton")
+        self.btn_fetch_data.setObjectName("ScraperFetchDataButton")
         self.btn_clear_data.setObjectName("ScraperClearButton")
         self.btn_fetch_orgs.setObjectName("ScraperFetchButton")
         self.btn_get_tenders.setObjectName("ScraperGetButton")
@@ -5772,6 +5779,15 @@ class ViewTendersPage(QWidget):
             self.backend.download_single_tender_logic(tender_db_id, mode)
         self._run_bg(worker)
 
+    def run_fetch_server_data(self):
+        def worker():
+            if hasattr(self.backend, "sync_remote_state"):
+                self.backend.sync_remote_state()
+                core.log_to_gui("Fetched latest scraper data from server cache.")
+            else:
+                core.log_to_gui("Server data fetch is only available in remote mode.")
+        self._run_bg(worker, done_refresh=True, switch_to_logs=False)
+
     def _ask_single_download_mode(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Download Mode")
@@ -6882,16 +6898,30 @@ class AppSettingsPage(QWidget):
         self.controller = controller
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        root.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        content_root = QVBoxLayout(content)
+        content_root.setContentsMargins(18, 18, 18, 18)
+        content_root.setSpacing(12)
 
         title = QLabel("Settings")
         title.setObjectName("PageTitle")
-        root.addWidget(title)
+        content_root.addWidget(title)
 
         form = QGridLayout()
         form.setColumnStretch(1, 1)
-        root.addLayout(form)
+        content_root.addLayout(form)
 
         self.db_dir_edit = QLineEdit()
         self.projects_dir_edit = QLineEdit()
@@ -6969,7 +6999,7 @@ class AppSettingsPage(QWidget):
             f"Current build: {core.APP_VERSION}"
         )
         hint.setObjectName("SoftText")
-        root.addWidget(hint)
+        content_root.addWidget(hint)
 
         updates_row = QHBoxLayout()
         self.check_update_btn = QPushButton("Check for Upgrade")
@@ -6981,7 +7011,7 @@ class AppSettingsPage(QWidget):
         updates_row.addWidget(self.check_update_btn)
         updates_row.addWidget(self.install_update_btn)
         updates_row.addWidget(self.update_status, 1)
-        root.addLayout(updates_row)
+        content_root.addLayout(updates_row)
 
         view_row = QHBoxLayout()
         self.projects_view_label = QLabel("")
@@ -6990,9 +7020,7 @@ class AppSettingsPage(QWidget):
         view_row.addWidget(QLabel("Projects Create View:"))
         view_row.addWidget(self.projects_view_label, 1)
         view_row.addWidget(self.projects_view_toggle_btn)
-        root.addLayout(view_row)
-
-        root.addStretch(1)
+        content_root.addLayout(view_row)
 
         btns = QHBoxLayout()
         self.save_btn = QPushButton("Save")
@@ -7001,7 +7029,7 @@ class AppSettingsPage(QWidget):
         btns.addWidget(self.save_btn)
         btns.addWidget(reload_btn)
         btns.addStretch(1)
-        root.addLayout(btns)
+        content_root.addLayout(btns)
 
         btn_db.clicked.connect(lambda: self._pick_dir_into(self.db_dir_edit))
         btn_projects.clicked.connect(lambda: self._pick_dir_into(self.projects_dir_edit))
