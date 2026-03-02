@@ -236,8 +236,13 @@ class BackendModeScraperProxy:
         return self._run_remote_action(action="sync_state", payload={}, sync_back=True)
 
     def push_local_state(self):
-        # Remote scraper state is server-authoritative. Do not push local org selections.
-        return True
+        if not self._remote_enabled():
+            return True
+        return self._run_remote_action(
+            action="sync_state",
+            payload={"db_snapshot_base64": self._encode_local_db_b64()},
+            sync_back=False,
+        )
 
     def fetch_tenders_logic(self, website_id, selected_org_names=None):
         if self._mode() == "remote":
@@ -257,13 +262,11 @@ class BackendModeScraperProxy:
             url, api_key = self._remote_config()
             if not url or not api_key:
                 raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
-            tender_ids = [str(x).strip() for x in (target_tender_ids or []) if str(x).strip()]
             return self._run_remote_action(
                 action="download_tenders",
                 payload={
                     "website_id": int(website_id),
                     "target_db_ids": target_db_ids,
-                    "target_tender_ids": tender_ids,
                     "forced_mode": forced_mode,
                 },
                 sync_back=False,
@@ -6241,7 +6244,10 @@ class ViewTendersPage(QWidget):
         self.on_site_changed()
 
     def _sync_remote_scraper_state_if_needed(self):
-        return
+        if not getattr(self.backend, "is_remote_mode", lambda: False)():
+            return
+        if hasattr(self.backend, "push_local_state"):
+            self.backend.push_local_state()
 
     def _log_scraper_execution_mode(self, action_name):
         if getattr(self.backend, "is_remote_mode", lambda: False)():
@@ -6477,6 +6483,7 @@ class ViewTendersPage(QWidget):
         def worker():
             self._log_scraper_execution_mode("Download selected tenders" if has_marked else "Single tender download")
             if has_marked:
+                self._sync_remote_scraper_state_if_needed()
                 eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_marked_tenders(sid)]
                 if not eligible_sites:
                     core.log_to_gui("No tenders marked for download.")
@@ -6484,7 +6491,6 @@ class ViewTendersPage(QWidget):
                 for sid in eligible_sites:
                     self.backend.download_tenders_logic(
                         sid,
-                        target_tender_ids=self._marked_local_tender_ids_for_site(sid),
                     )
                 return
             self.backend.download_single_tender_logic(tender_db_id, mode)

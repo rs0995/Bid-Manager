@@ -1,7 +1,7 @@
 {
   "viewtenders_selected_site": "1",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "logs",
+  "viewtenders_last_tab": "tenders",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
