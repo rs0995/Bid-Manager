@@ -47,6 +47,16 @@ def _server_root() -> Path:
     return p
 
 
+def _safe_key_fragment(api_key_id: str) -> str:
+    return "".join(ch for ch in str(api_key_id or "") if ch.isalnum())[:12] or "client"
+
+
+def _user_root(api_key: dict) -> Path:
+    root = _server_root() / _safe_key_fragment(str(api_key.get("key_id") or ""))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _resolve_storage_path(relative_path: str) -> Path:
     base = _server_root()
     rel = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
@@ -126,6 +136,16 @@ def _storage_usage(root: Path) -> dict:
             datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat() if latest_mtime else ""
         ),
     }
+
+
+def _resolve_child_path(base: Path, relative_path: str) -> Path:
+    rel = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
+    candidate = (base / rel).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path is outside the allowed storage root.") from exc
+    return candidate
 
 
 @app.middleware("http")
@@ -227,6 +247,13 @@ def admin_storage_usage(_: None = Depends(require_admin_key)) -> dict:
     return {"usage": usage}
 
 
+@app.get("/v1/storage/usage")
+def storage_usage(api_key: dict = Depends(require_api_key)) -> dict:
+    root = _user_root(api_key)
+    usage = _storage_usage(root)
+    return {"usage": usage}
+
+
 @app.post("/v1/admin/storage/list")
 def admin_storage_list(req: StorageListRequest, _: None = Depends(require_admin_key)) -> dict:
     max_entries = max(1, min(10000, int(req.max_entries or 2000)))
@@ -246,6 +273,31 @@ def admin_storage_list(req: StorageListRequest, _: None = Depends(require_admin_
     items, truncated = _iter_storage(_server_root(), root, max_entries)
     return {
         "root": root.relative_to(_server_root()).as_posix() if root != _server_root() else "",
+        "items": items,
+        "truncated": truncated,
+    }
+
+
+@app.post("/v1/storage/list")
+def storage_list(req: StorageListRequest, api_key: dict = Depends(require_api_key)) -> dict:
+    base = _user_root(api_key)
+    max_entries = max(1, min(10000, int(req.max_entries or 2000)))
+    root = _resolve_child_path(base, req.relative_root)
+    if not root.exists():
+        raise HTTPException(status_code=404, detail="Storage path not found.")
+    if root.is_file():
+        stat = root.stat()
+        item = {
+            "path": root.relative_to(base).as_posix(),
+            "name": root.name,
+            "kind": "file",
+            "size_bytes": int(stat.st_size),
+            "modified_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        }
+        return {"root": item["path"], "items": [item], "truncated": False}
+    items, truncated = _iter_storage(base, root, max_entries)
+    return {
+        "root": root.relative_to(base).as_posix() if root != base else "",
         "items": items,
         "truncated": truncated,
     }

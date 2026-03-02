@@ -83,6 +83,9 @@ class BidApiClient:
     def admin_storage_usage(self, admin_key: str) -> dict[str, Any]:
         return self._request("GET", "/v1/admin/storage/usage", headers={"X-Admin-Key": admin_key})
 
+    def storage_usage(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/storage/usage")
+
     def admin_storage_list(
         self,
         admin_key: str,
@@ -91,6 +94,10 @@ class BidApiClient:
     ) -> dict[str, Any]:
         body = {"relative_root": relative_root, "max_entries": int(max_entries)}
         return self._request("POST", "/v1/admin/storage/list", json=body, headers={"X-Admin-Key": admin_key})
+
+    def storage_list(self, relative_root: str = "", max_entries: int = 2000) -> dict[str, Any]:
+        body = {"relative_root": relative_root, "max_entries": int(max_entries)}
+        return self._request("POST", "/v1/storage/list", json=body)
 
     def admin_storage_delete_folder(self, admin_key: str, relative_path: str) -> dict[str, Any]:
         body = {"relative_path": relative_path}

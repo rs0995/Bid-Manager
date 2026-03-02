@@ -8231,6 +8231,14 @@ class ServerStoragePage(QWidget):
         scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 2, 2)
         root.addLayout(scraper_form)
 
+        self.server_tabs = QTabWidget()
+        root.addWidget(self.server_tabs, 1)
+
+        storage_tab = QWidget()
+        storage_root = QVBoxLayout(storage_tab)
+        storage_root.setContentsMargins(0, 0, 0, 0)
+        storage_root.setSpacing(10)
+
         controls = QHBoxLayout()
         controls.setSpacing(8)
         controls.addWidget(QLabel("Relative Path:"))
@@ -8241,7 +8249,7 @@ class ServerStoragePage(QWidget):
         self.parent_btn = QPushButton("Up")
         controls.addWidget(self.refresh_btn)
         controls.addWidget(self.parent_btn)
-        root.addLayout(controls)
+        storage_root.addLayout(controls)
 
         stats = QHBoxLayout()
         stats.setSpacing(12)
@@ -8251,7 +8259,7 @@ class ServerStoragePage(QWidget):
         self.counts_label.setObjectName("SoftText")
         stats.addWidget(self.usage_label)
         stats.addWidget(self.counts_label, 1)
-        root.addLayout(stats)
+        storage_root.addLayout(stats)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -8265,7 +8273,7 @@ class ServerStoragePage(QWidget):
         actions.addWidget(self.delete_older_btn)
         actions.addWidget(self.delete_days_edit)
         actions.addStretch(1)
-        root.addLayout(actions)
+        storage_root.addLayout(actions)
 
         self.table = QTableWidget(0, 4)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -8276,17 +8284,23 @@ class ServerStoragePage(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        root.addWidget(self.table, 1)
-
-        self.log_view = QTextBrowser()
-        self.log_view.setObjectName("LogView")
-        self.log_view.setMinimumHeight(140)
-        root.addWidget(self.log_view)
+        storage_root.addWidget(self.table, 1)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("SoftText")
         self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
+        storage_root.addWidget(self.status_label)
+
+        logs_tab = QWidget()
+        logs_root = QVBoxLayout(logs_tab)
+        logs_root.setContentsMargins(0, 0, 0, 0)
+        logs_root.setSpacing(0)
+        self.log_view = QTextBrowser()
+        self.log_view.setObjectName("LogView")
+        logs_root.addWidget(self.log_view)
+
+        self.server_tabs.addTab(storage_tab, "Storage")
+        self.server_tabs.addTab(logs_tab, "Live Logs")
 
         self.btn_fetch_orgs.clicked.connect(self.run_fetch_orgs)
         self.btn_get_tenders.clicked.connect(self.run_fetch_tenders)
@@ -8324,21 +8338,27 @@ class ServerStoragePage(QWidget):
         self.delete_folder_btn.setEnabled(admin_ready)
         self.delete_older_btn.setEnabled(admin_ready)
         self.delete_days_edit.setEnabled(admin_ready)
-        self.path_edit.setEnabled(admin_ready)
+        self.path_edit.setEnabled(scraper_ready)
         if admin_ready:
             self.info_label.setText("Run server-only scraper actions here and manage files inside the server storage volume.")
             self.refresh_listing()
             return
-        self._items = []
-        self.table.setRowCount(0)
-        self.usage_label.setText("Usage: -")
-        self.counts_label.setText("")
-        self.status_label.setText("")
         if scraper_ready:
-            self.info_label.setText("Remote scraper control is available. Add the Backend Admin Key in Settings to browse and delete server files.")
+            self.info_label.setText("Remote scraper control is available. Showing the current API key's server data. Add the Backend Admin Key to browse and delete the full server volume.")
+            self.refresh_listing()
         elif FRONTEND_REMOTE_ONLY:
+            self._items = []
+            self.table.setRowCount(0)
+            self.usage_label.setText("Usage: -")
+            self.counts_label.setText("")
+            self.status_label.setText("")
             self.info_label.setText("Configure Backend URL and API key in Settings. Add the Admin key to manage server files.")
         else:
+            self._items = []
+            self.table.setRowCount(0)
+            self.usage_label.setText("Usage: -")
+            self.counts_label.setText("")
+            self.status_label.setText("")
             self.info_label.setText("Switch Backend Mode to Remote and configure Backend URL/API key. Add the Admin key to manage server files.")
 
     def _remote_scraper_ready(self):
@@ -8457,14 +8477,18 @@ class ServerStoragePage(QWidget):
             self.table.selectRow(0)
 
     def refresh_listing(self):
-        if not self._remote_admin_ready():
+        if not self._remote_scraper_ready():
             self.refresh_configuration()
             return
         try:
             client = self._client()
             root_path = str(self.path_edit.text() or "").strip()
-            usage = client.admin_storage_usage(self._backend_admin_key()).get("usage") or {}
-            listing = client.admin_storage_list(self._backend_admin_key(), relative_root=root_path, max_entries=3000)
+            if self._remote_admin_ready():
+                usage = client.admin_storage_usage(self._backend_admin_key()).get("usage") or {}
+                listing = client.admin_storage_list(self._backend_admin_key(), relative_root=root_path, max_entries=3000)
+            else:
+                usage = client.storage_usage().get("usage") or {}
+                listing = client.storage_list(relative_root=root_path, max_entries=3000)
             self._populate_items(listing.get("items") or [])
             self.usage_label.setText(f"Usage: {self._format_size(usage.get('total_bytes') or 0)}")
             self.counts_label.setText(
