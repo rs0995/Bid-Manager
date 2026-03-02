@@ -228,6 +228,7 @@ class BackendModeScraperProxy:
             action="fetch_organisations",
             payload={"website_id": int(website_id)},
             website_id=int(website_id),
+            sync_back_remote=True,
         )
 
     def sync_remote_state(self):
@@ -253,7 +254,7 @@ class BackendModeScraperProxy:
             return self._run_remote_action(
                 action="fetch_tenders",
                 payload={"website_id": int(website_id), "selected_org_names": names},
-                sync_back=False,
+                sync_back=True,
             )
         return self.local.fetch_tenders_logic(int(website_id))
 
@@ -269,7 +270,7 @@ class BackendModeScraperProxy:
                     "target_db_ids": target_db_ids,
                     "forced_mode": forced_mode,
                 },
-                sync_back=False,
+                sync_back=True,
             )
         return self.local.download_tenders_logic(
             int(website_id),
@@ -284,6 +285,7 @@ class BackendModeScraperProxy:
             payload={"website_id": int(website_id), "archived_only": bool(archived_only)},
             website_id=int(website_id),
             archived_only=bool(archived_only),
+            sync_back_remote=True,
         )
 
     def download_tender_results_logic(self, website_id):
@@ -292,6 +294,7 @@ class BackendModeScraperProxy:
             action="download_results",
             payload={"website_id": int(website_id)},
             website_id=int(website_id),
+            sync_back_remote=True,
         )
 
     def download_single_tender_logic(self, tender_db_id, mode):
@@ -301,6 +304,47 @@ class BackendModeScraperProxy:
             payload={"tender_db_id": int(tender_db_id), "mode": str(mode)},
             tender_db_id=int(tender_db_id),
             mode=str(mode),
+            sync_back_remote=True,
+        )
+
+    def fetch_organisations_server(self, website_id):
+        return self._run_remote_action(
+            action="fetch_organisations",
+            payload={"website_id": int(website_id)},
+            sync_back=False,
+        )
+
+    def fetch_tenders_server(self, website_id, selected_org_names=None):
+        names = [str(x).strip() for x in (selected_org_names or []) if str(x).strip()]
+        return self._run_remote_action(
+            action="fetch_tenders",
+            payload={"website_id": int(website_id), "selected_org_names": names},
+            sync_back=False,
+        )
+
+    def download_tenders_server(self, website_id, target_db_ids=None, forced_mode=None):
+        return self._run_remote_action(
+            action="download_tenders",
+            payload={
+                "website_id": int(website_id),
+                "target_db_ids": target_db_ids,
+                "forced_mode": forced_mode,
+            },
+            sync_back=False,
+        )
+
+    def download_results_server(self, website_id):
+        return self._run_remote_action(
+            action="download_results",
+            payload={"website_id": int(website_id)},
+            sync_back=False,
+        )
+
+    def check_tender_status_server(self, website_id, archived_only=False):
+        return self._run_remote_action(
+            action="check_status",
+            payload={"website_id": int(website_id), "archived_only": bool(archived_only)},
+            sync_back=False,
         )
 
     def _remote_download_to_folder(self, source_tender_id, destination_folder, mode):
@@ -8126,12 +8170,13 @@ class ServerStoragePage(QWidget):
         super().__init__()
         self.controller = controller
         self._items = []
+        self._job_running = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(12)
 
-        title = QLabel("Server Storage")
+        title = QLabel("Server Control")
         title.setObjectName("PageTitle")
         root.addWidget(title)
 
@@ -8139,6 +8184,33 @@ class ServerStoragePage(QWidget):
         self.info_label.setObjectName("SoftText")
         self.info_label.setWordWrap(True)
         root.addWidget(self.info_label)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addWidget(QLabel("Website:"))
+        self.cb_sites = QComboBox()
+        self.cb_sites.setMinimumWidth(180)
+        self.cb_sites.setMaximumWidth(220)
+        action_row.addWidget(self.cb_sites)
+        self.btn_fetch_orgs = QPushButton("Fetch Organizations")
+        self.btn_get_tenders = QPushButton("Get Tenders")
+        self.btn_download_selected = QPushButton("Download Selected")
+        self.btn_download_results = QPushButton("Download Results")
+        self.btn_check_status = QPushButton("Check Status")
+        self.btn_sync_local = QPushButton("Fetch Data")
+        for btn in (
+            self.btn_fetch_orgs,
+            self.btn_get_tenders,
+            self.btn_download_selected,
+            self.btn_download_results,
+            self.btn_check_status,
+            self.btn_sync_local,
+        ):
+            btn.setProperty("compact", True)
+            btn.setFixedHeight(29)
+            action_row.addWidget(btn)
+        action_row.addStretch(1)
+        root.addLayout(action_row)
 
         scraper_form = QGridLayout()
         scraper_form.setColumnStretch(1, 1)
@@ -8206,11 +8278,22 @@ class ServerStoragePage(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         root.addWidget(self.table, 1)
 
+        self.log_view = QTextBrowser()
+        self.log_view.setObjectName("LogView")
+        self.log_view.setMinimumHeight(140)
+        root.addWidget(self.log_view)
+
         self.status_label = QLabel("")
         self.status_label.setObjectName("SoftText")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
+        self.btn_fetch_orgs.clicked.connect(self.run_fetch_orgs)
+        self.btn_get_tenders.clicked.connect(self.run_fetch_tenders)
+        self.btn_download_selected.clicked.connect(self.run_download)
+        self.btn_download_results.clicked.connect(self.run_download_results)
+        self.btn_check_status.clicked.connect(self.run_status_check)
+        self.btn_sync_local.clicked.connect(self.run_fetch_data)
         self.refresh_btn.clicked.connect(self.refresh_listing)
         self.parent_btn.clicked.connect(self.go_parent)
         self.delete_folder_btn.clicked.connect(self.delete_selected_folder)
@@ -8224,8 +8307,26 @@ class ServerStoragePage(QWidget):
 
     def refresh_configuration(self):
         self.refresh_scraper_settings()
-        if self._remote_ready():
-            self.info_label.setText("Browse and manage files inside the server storage volume using the admin API.")
+        self.refresh_sites()
+        scraper_ready = self._remote_scraper_ready()
+        admin_ready = self._remote_admin_ready()
+        for btn in (
+            self.btn_fetch_orgs,
+            self.btn_get_tenders,
+            self.btn_download_selected,
+            self.btn_download_results,
+            self.btn_check_status,
+            self.btn_sync_local,
+        ):
+            btn.setEnabled(scraper_ready and not self._job_running)
+        self.refresh_btn.setEnabled(admin_ready)
+        self.parent_btn.setEnabled(admin_ready)
+        self.delete_folder_btn.setEnabled(admin_ready)
+        self.delete_older_btn.setEnabled(admin_ready)
+        self.delete_days_edit.setEnabled(admin_ready)
+        self.path_edit.setEnabled(admin_ready)
+        if admin_ready:
+            self.info_label.setText("Run server-only scraper actions here and manage files inside the server storage volume.")
             self.refresh_listing()
             return
         self._items = []
@@ -8233,16 +8334,21 @@ class ServerStoragePage(QWidget):
         self.usage_label.setText("Usage: -")
         self.counts_label.setText("")
         self.status_label.setText("")
-        if FRONTEND_REMOTE_ONLY:
-            self.info_label.setText("Remote mode is required. Configure Backend URL, API key, and Admin key in Settings.")
+        if scraper_ready:
+            self.info_label.setText("Remote scraper control is available. Add the Backend Admin Key in Settings to browse and delete server files.")
+        elif FRONTEND_REMOTE_ONLY:
+            self.info_label.setText("Configure Backend URL and API key in Settings. Add the Admin key to manage server files.")
         else:
-            self.info_label.setText("Switch Backend Mode to Remote and configure Backend URL, API key, and Admin key in Settings.")
+            self.info_label.setText("Switch Backend Mode to Remote and configure Backend URL/API key. Add the Admin key to manage server files.")
 
-    def _remote_ready(self):
+    def _remote_scraper_ready(self):
         mode = "remote" if FRONTEND_REMOTE_ONLY else str(core.get_user_setting("backend_mode", "local") or "local").strip().lower()
         if mode != "remote":
             return False
-        return bool(self._backend_url() and self._backend_api_key() and self._backend_admin_key())
+        return bool(self._backend_url() and self._backend_api_key())
+
+    def _remote_admin_ready(self):
+        return bool(self._remote_scraper_ready() and self._backend_admin_key())
 
     def _backend_url(self):
         return str(core.get_user_setting("backend_url", "") or "").strip().rstrip("/")
@@ -8258,6 +8364,10 @@ class ServerStoragePage(QWidget):
 
     def _set_status(self, text):
         self.status_label.setText(str(text or "").strip())
+
+    def append_log(self, text):
+        self.log_view.append(str(text))
+        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     def _format_last_auto_fetch_text(self):
         raw = str(core.get_user_setting("scraper_last_auto_fetch_at", "") or "").strip()
@@ -8277,7 +8387,7 @@ class ServerStoragePage(QWidget):
         self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
         self.scraper_auto_fetch_interval_edit.blockSignals(old_edit_block)
         self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
-        enabled = self._remote_ready()
+        enabled = self._remote_scraper_ready()
         self.scraper_auto_fetch_chk.setEnabled(enabled)
         self.scraper_auto_fetch_interval_edit.setEnabled(enabled)
         self.scraper_run_auto_fetch_btn.setEnabled(enabled)
@@ -8347,7 +8457,7 @@ class ServerStoragePage(QWidget):
             self.table.selectRow(0)
 
     def refresh_listing(self):
-        if not self._remote_ready():
+        if not self._remote_admin_ready():
             self.refresh_configuration()
             return
         try:
@@ -8384,7 +8494,7 @@ class ServerStoragePage(QWidget):
         self.refresh_listing()
 
     def delete_selected_folder(self):
-        if not self._remote_ready():
+        if not self._remote_admin_ready():
             self.refresh_configuration()
             return
         item = self._selected_item()
@@ -8407,7 +8517,7 @@ class ServerStoragePage(QWidget):
             self._set_status(f"Failed to delete folder: {e}")
 
     def delete_older_files(self):
-        if not self._remote_ready():
+        if not self._remote_admin_ready():
             self.refresh_configuration()
             return
         try:
@@ -8434,6 +8544,115 @@ class ServerStoragePage(QWidget):
             )
         except Exception as e:
             self._set_status(f"Failed to delete older files: {e}")
+
+    def refresh_sites(self):
+        sites = self.controller.scraper_backend.get_websites()
+        values = [("ALL", "ALL: All Websites")] + [(str(k), f"{k}: {v['name']}") for k, v in sites.items()]
+        selected = str(self.cb_sites.currentData() or "ALL")
+        self.cb_sites.blockSignals(True)
+        self.cb_sites.clear()
+        for sid, label in values:
+            self.cb_sites.addItem(label, sid)
+        idx = 0
+        for i in range(self.cb_sites.count()):
+            if str(self.cb_sites.itemData(i)) == selected:
+                idx = i
+                break
+        self.cb_sites.setCurrentIndex(idx)
+        self.cb_sites.blockSignals(False)
+
+    def get_selected_site_id(self):
+        sid = str(self.cb_sites.currentData() or "ALL").strip().upper()
+        if sid == "ALL":
+            return None
+        try:
+            return int(sid)
+        except Exception:
+            return None
+
+    def get_target_site_ids(self):
+        sid = self.get_selected_site_id()
+        if sid is not None:
+            return [sid]
+        return sorted(self.controller.scraper_backend.get_websites().keys())
+
+    def _selected_local_org_names_for_site(self, site_id):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            if site_id is None:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(name,'')) FROM organizations WHERE COALESCE(is_selected,0)=1"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(name,'')) FROM organizations WHERE website_id=? AND COALESCE(is_selected,0)=1",
+                    (site_id,),
+                ).fetchall()
+            return [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+        finally:
+            conn.close()
+
+    def _run_server_job(self, label, worker):
+        if not self._remote_scraper_ready():
+            self.refresh_configuration()
+            return
+        if self._job_running:
+            return
+        self._job_running = True
+        self.refresh_configuration()
+        core.log_to_gui(f"{label} started.")
+
+        def runner():
+            try:
+                worker()
+                core.log_to_gui(f"{label} completed.")
+            except Exception as e:
+                core.log_to_gui(f"{label} failed: {e}")
+            finally:
+                self._job_running = False
+                QTimer.singleShot(0, self.refresh_configuration)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def run_fetch_orgs(self):
+        def worker():
+            for sid in self.get_target_site_ids():
+                self.controller.scraper_backend.fetch_organisations_server(sid)
+        self._run_server_job("Server fetch organizations", worker)
+
+    def run_fetch_tenders(self):
+        def worker():
+            target_sites = self.get_target_site_ids()
+            for sid in target_sites:
+                self.controller.scraper_backend.fetch_tenders_server(
+                    sid,
+                    selected_org_names=self._selected_local_org_names_for_site(sid),
+                )
+        self._run_server_job("Server fetch tenders", worker)
+
+    def run_download(self):
+        def worker():
+            self.controller.scraper_backend.push_local_state()
+            for sid in self.get_target_site_ids():
+                self.controller.scraper_backend.download_tenders_server(sid)
+        self._run_server_job("Server download selected tenders", worker)
+
+    def run_download_results(self):
+        def worker():
+            for sid in self.get_target_site_ids():
+                self.controller.scraper_backend.download_results_server(sid)
+        self._run_server_job("Server download results", worker)
+
+    def run_status_check(self):
+        def worker():
+            for sid in self.get_target_site_ids():
+                self.controller.scraper_backend.check_tender_status_server(sid, archived_only=False)
+        self._run_server_job("Server status check", worker)
+
+    def run_fetch_data(self):
+        def worker():
+            self.controller.scraper_backend.sync_remote_state()
+        self._run_server_job("Fetch server data to local", worker)
 
 
 class PlaceholderPage(QWidget):
@@ -8489,7 +8708,7 @@ class BidManagerQt(QMainWindow):
         self.btn_projects = QPushButton("Projects")
         self.btn_online = QPushButton("Online Tenders")
         self.btn_templates = QPushButton("Templates")
-        self.btn_server_storage = QPushButton("Server Storage")
+        self.btn_server_storage = QPushButton("Server Control")
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         for btn in (self.btn_projects, self.btn_online, self.btn_templates, self.btn_server_storage):
@@ -8681,6 +8900,11 @@ class BidManagerQt(QMainWindow):
             try:
                 if hasattr(self, "online_page") and self.online_page:
                     self.online_page.append_log(msg)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "server_storage_page") and self.server_storage_page:
+                    self.server_storage_page.append_log(msg)
             except Exception:
                 pass
 
