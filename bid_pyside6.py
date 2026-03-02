@@ -236,32 +236,40 @@ class BackendModeScraperProxy:
         return self._run_remote_action(action="sync_state", payload={}, sync_back=True)
 
     def push_local_state(self):
-        if not self._remote_enabled():
-            return True
-        return self._run_remote_action(
-            action="sync_state",
-            payload={"db_snapshot_base64": self._encode_local_db_b64()},
-            sync_back=False,
-        )
+        # Remote scraper state is server-authoritative. Do not push local org selections.
+        return True
 
-    def fetch_tenders_logic(self, website_id):
-        return self._run_or_local(
-            "fetch_tenders_logic",
-            action="fetch_tenders",
-            payload={"website_id": int(website_id)},
-            website_id=int(website_id),
-        )
+    def fetch_tenders_logic(self, website_id, selected_org_names=None):
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            names = [str(x).strip() for x in (selected_org_names or []) if str(x).strip()]
+            return self._run_remote_action(
+                action="fetch_tenders",
+                payload={"website_id": int(website_id), "selected_org_names": names},
+                sync_back=False,
+            )
+        return self.local.fetch_tenders_logic(int(website_id))
 
-    def download_tenders_logic(self, website_id, target_db_ids=None, forced_mode=None):
-        return self._run_or_local(
-            "download_tenders_logic",
-            action="download_tenders",
-            payload={
-                "website_id": int(website_id),
-                "target_db_ids": target_db_ids,
-                "forced_mode": forced_mode,
-            },
-            website_id=int(website_id),
+    def download_tenders_logic(self, website_id, target_db_ids=None, forced_mode=None, target_tender_ids=None):
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            tender_ids = [str(x).strip() for x in (target_tender_ids or []) if str(x).strip()]
+            return self._run_remote_action(
+                action="download_tenders",
+                payload={
+                    "website_id": int(website_id),
+                    "target_db_ids": target_db_ids,
+                    "target_tender_ids": tender_ids,
+                    "forced_mode": forced_mode,
+                },
+                sync_back=False,
+            )
+        return self.local.download_tenders_logic(
+            int(website_id),
             target_db_ids=target_db_ids,
             forced_mode=forced_mode,
         )
@@ -334,6 +342,10 @@ def auto_fit_table_rows(table, min_height=24, max_height=None):
 
 def _project_metadata_path(folder_path):
     return os.path.join(str(folder_path or "").strip(), ".bidmanager_project.json")
+
+
+def _project_checklist_snapshot_path(folder_path):
+    return os.path.join(str(folder_path or "").strip(), ".bidmanager_checklist.json")
 
 
 def _project_index_path(root_folder=None):
@@ -428,6 +440,74 @@ def merge_project_metadata(primary, fallback):
         if str(value or "").strip():
             merged[key] = value
     return merged
+
+
+def _normalize_project_subfolder(rel):
+    txt = str(rel or "").strip()
+    if not txt or txt == "." or txt.lower() == "main":
+        return "Main"
+    txt = txt.replace("/", os.sep).replace("\\", os.sep)
+    txt = os.path.normpath(txt).strip()
+    if txt in ("", ".", os.sep):
+        return "Main"
+    if txt.startswith(os.sep):
+        txt = txt.lstrip(os.sep)
+    return txt
+
+
+def _is_project_support_file(name):
+    low = str(name or "").strip().lower()
+    return low in {".bidmanager_project.json", ".bidmanager_checklist.json", ".bidmanager_projects_index.json"}
+
+
+def write_project_checklist_snapshot(folder_path, items):
+    folder = str(folder_path or "").strip()
+    if not folder:
+        return
+    payload = []
+    try:
+        for row in items or []:
+            payload.append(
+                {
+                    "sr_no": int(row[1] or 0),
+                    "req_file_name": str(row[2] or "").strip(),
+                    "description": str(row[3] or "").strip(),
+                    "status": str(row[4] or "").strip() or "Pending",
+                    "linked_file_path": str(row[5] or "").strip(),
+                    "subfolder": _normalize_project_subfolder(row[6] if len(row) > 6 else "Main"),
+                }
+            )
+        with open(_project_checklist_snapshot_path(folder), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+
+
+def read_project_checklist_snapshot(folder_path):
+    path = _project_checklist_snapshot_path(folder_path)
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                out = []
+                for row in raw:
+                    if not isinstance(row, dict):
+                        continue
+                    out.append(
+                        {
+                            "sr_no": int(row.get("sr_no", 0) or 0),
+                            "req_file_name": str(row.get("req_file_name", "") or "").strip(),
+                            "description": str(row.get("description", "") or "").strip(),
+                            "status": str(row.get("status", "Pending") or "Pending").strip(),
+                            "linked_file_path": str(row.get("linked_file_path", "") or "").strip(),
+                            "subfolder": _normalize_project_subfolder(row.get("subfolder", "Main")),
+                        }
+                    )
+                return out
+    except Exception:
+        pass
+    return []
 
 
 def write_project_folder_metadata(folder_path, payload):
@@ -1800,6 +1880,154 @@ class ProjectsPage(QWidget):
         finally:
             conn.close()
 
+    def _hydrate_project_metadata_from_tenders(self, conn, meta):
+        hydrated = dict(meta or {})
+        tender_id = str(hydrated.get("source_tender_id", "") or "").strip()
+        if not tender_id:
+            return hydrated
+        row = conn.execute(
+            """SELECT COALESCE(title,''), COALESCE(work_description,''), COALESCE(org_chain,''),
+                      COALESCE(tender_value,''), COALESCE(pre_bid_meeting_date,''), COALESCE(closing_date,'')
+               FROM tenders
+               WHERE COALESCE(tender_id,'')=?
+               ORDER BY COALESCE(is_archived,0), id DESC
+               LIMIT 1""",
+            (tender_id,),
+        ).fetchone()
+        if not row:
+            return hydrated
+        listing_title, work_desc, org_chain, tender_value, prebid, closing = row
+        if not str(hydrated.get("title", "") or "").strip():
+            hydrated["title"] = tender_id
+        if not str(hydrated.get("description", "") or "").strip():
+            hydrated["description"] = str(work_desc or listing_title or "").strip()
+        if not str(hydrated.get("client_name", "") or "").strip():
+            hydrated["client_name"] = str(org_chain or "").strip()
+        if not str(hydrated.get("project_value", "") or "").strip():
+            hydrated["project_value"] = str(tender_value or "").strip()
+        if not str(hydrated.get("prebid", "") or "").strip():
+            hydrated["prebid"] = str(prebid or "").strip()
+        if not str(hydrated.get("deadline", "") or "").strip():
+            hydrated["deadline"] = str(closing or "").strip()
+        return hydrated
+
+    def _sync_project_checklist_from_folder(self, conn, project_id, folder_path):
+        folder_path = str(folder_path or "").strip()
+        if not folder_path or not os.path.isdir(folder_path):
+            return 0, 0
+        core.ensure_project_standard_folders(folder_path)
+        rows = conn.execute(
+            """SELECT id, COALESCE(req_file_name,''), COALESCE(description,''), COALESCE(status,'Pending'),
+                      COALESCE(linked_file_path,''), COALESCE(subfolder,'Main')
+               FROM checklist_items
+               WHERE project_id=?""",
+            (int(project_id),),
+        ).fetchall()
+
+        fs_index = {}
+        for root, _dirs, files in os.walk(folder_path):
+            rel_root = _normalize_project_subfolder(os.path.relpath(root, folder_path))
+            for fn in files:
+                if _is_project_support_file(fn):
+                    continue
+                full = os.path.join(root, fn)
+                try:
+                    f_abs = os.path.normcase(os.path.abspath(full))
+                except Exception:
+                    continue
+                fs_index[f_abs] = (rel_root, fn, full)
+
+        to_delete_ids = set()
+        linked_by_path = {}
+        represented_paths = set()
+
+        for rid, req_name, _desc, status, linked_file_path, subfolder in rows:
+            lp = str(linked_file_path or "").strip()
+            if not lp:
+                continue
+            try:
+                lp_abs = os.path.normcase(os.path.abspath(lp))
+            except Exception:
+                to_delete_ids.add(rid)
+                continue
+            if lp_abs in linked_by_path:
+                to_delete_ids.add(rid)
+                continue
+            if lp_abs not in fs_index:
+                to_delete_ids.add(rid)
+                continue
+            linked_by_path[lp_abs] = rid
+            represented_paths.add(lp_abs)
+            rel_root, fn, full = fs_index[lp_abs]
+            needs_update = (
+                str(req_name or "") != fn
+                or _normalize_project_subfolder(subfolder) != rel_root
+                or str(lp) != str(full)
+                or str(status or "") != "Completed"
+            )
+            if needs_update:
+                conn.execute(
+                    """UPDATE checklist_items
+                       SET req_file_name=?, subfolder=?, linked_file_path=?, status='Completed'
+                       WHERE id=?""",
+                    (fn, rel_root, full, rid),
+                )
+
+        removed = 0
+        if to_delete_ids:
+            q = ",".join(["?"] * len(to_delete_ids))
+            conn.execute(f"DELETE FROM checklist_items WHERE id IN ({q})", tuple(to_delete_ids))
+            removed = len(to_delete_ids)
+
+        count_row = conn.execute("SELECT COUNT(*) FROM checklist_items WHERE project_id=?", (int(project_id),)).fetchone()
+        next_sr = int((count_row[0] if count_row else 0) or 0) + 1
+        inserted = 0
+        for f_abs, (rel_root, fn, full) in sorted(fs_index.items(), key=lambda kv: kv[1][1].lower()):
+            if f_abs in represented_paths:
+                continue
+            conn.execute(
+                """INSERT INTO checklist_items
+                   (project_id, sr_no, req_file_name, description, subfolder, linked_file_path, status)
+                   VALUES (?, ?, ?, ?, ?, ?, 'Completed')""",
+                (int(project_id), next_sr, fn, "", rel_root, full),
+            )
+            next_sr += 1
+            inserted += 1
+        return inserted, removed
+
+    def _restore_project_checklist_snapshot(self, conn, project_id, folder_path):
+        existing_count = conn.execute("SELECT COUNT(*) FROM checklist_items WHERE project_id=?", (int(project_id),)).fetchone()
+        if int((existing_count[0] if existing_count else 0) or 0) > 0:
+            return 0
+        rows = read_project_checklist_snapshot(folder_path)
+        restored = 0
+        for idx, row in enumerate(rows, 1):
+            req_name = str(row.get("req_file_name", "") or "").strip()
+            desc = str(row.get("description", "") or "").strip()
+            subfolder = _normalize_project_subfolder(row.get("subfolder", "Main"))
+            linked_file_path = str(row.get("linked_file_path", "") or "").strip()
+            status = str(row.get("status", "Pending") or "Pending").strip() or "Pending"
+            if linked_file_path and not os.path.isfile(linked_file_path):
+                linked_file_path = ""
+                if status == "Completed":
+                    status = "Pending"
+            conn.execute(
+                """INSERT INTO checklist_items
+                   (project_id, sr_no, req_file_name, description, subfolder, linked_file_path, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(project_id),
+                    int(row.get("sr_no", idx) or idx),
+                    req_name,
+                    desc,
+                    subfolder,
+                    linked_file_path,
+                    status,
+                ),
+            )
+            restored += 1
+        return restored
+
     def restore_projects_from_folders(self):
         root_folder = core._resolve_path(core.ROOT_FOLDER)
         os.makedirs(root_folder, exist_ok=True)
@@ -1826,11 +2054,14 @@ class ProjectsPage(QWidget):
 
             inserted = 0
             updated = 0
+            checklist_restored = 0
+            checklist_synced = 0
             for name in sorted(os.listdir(root_folder), key=lambda x: x.lower()):
                 full = os.path.join(root_folder, name)
                 if not os.path.isdir(full):
                     continue
                 meta = read_project_folder_metadata(full)
+                meta = self._hydrate_project_metadata_from_tenders(conn, meta)
                 folder_abs = os.path.normcase(os.path.abspath(full))
                 source_tender_id = str(meta.get("source_tender_id", "") or "").strip()
                 title = str(meta.get("title", "") or "").strip() or name
@@ -1841,7 +2072,7 @@ class ProjectsPage(QWidget):
                     pid = existing_by_title.get(title.lower())
 
                 if pid is None:
-                    conn.execute(
+                    cur = conn.execute(
                         "INSERT INTO projects (title, client_name, deadline, description, folder_path, source_tender_id, project_value, prebid, status) VALUES (?,?,?,?,?,?,?,?,?)",
                         (
                             title,
@@ -1855,6 +2086,7 @@ class ProjectsPage(QWidget):
                             str(meta.get("status", "Active") or "Active").strip(),
                         ),
                     )
+                    pid = int(cur.lastrowid or 0)
                     write_project_folder_metadata(full, meta)
                     inserted += 1
                 else:
@@ -1875,11 +2107,28 @@ class ProjectsPage(QWidget):
                     )
                     updated += 1
                     write_project_folder_metadata(full, meta)
+                if pid:
+                    checklist_restored += self._restore_project_checklist_snapshot(conn, pid, full)
+                    added_items, _removed_items = self._sync_project_checklist_from_folder(conn, pid, full)
+                    checklist_synced += int(added_items or 0)
+                    snapshot_rows = conn.execute(
+                        """SELECT id, sr_no, req_file_name, description, status, linked_file_path, subfolder
+                           FROM checklist_items
+                           WHERE project_id=?
+                           ORDER BY subfolder, sr_no, id""",
+                        (int(pid),),
+                    ).fetchall()
+                    write_project_checklist_snapshot(full, snapshot_rows)
             conn.commit()
         finally:
             conn.close()
         self.load_projects()
-        QMessageBox.information(self, "Update Projects", f"Projects restored from folders. Added {inserted}, updated {updated}.")
+        QMessageBox.information(
+            self,
+            "Update Projects",
+            f"Projects restored from folders. Added {inserted}, updated {updated}, "
+            f"checklist restored {checklist_restored}, files synced {checklist_synced}.",
+        )
 
     def _format_row(self, sr, r):
         deadline_txt = str(r[6] or "")
@@ -2733,7 +2982,6 @@ class ProjectDetailsPage(QWidget):
         self.open_explorer_btn.setProperty("legacyProjectTopButton", True)
         checklist_controls_layout.addLayout(form)
         checklist_controls_layout.addLayout(actions)
-        root.addWidget(checklist_panel)
 
         self.table = QTableWidget(0, len(self.headers))
         self.table.setHorizontalHeaderLabels(self.headers)
@@ -2798,15 +3046,23 @@ class ProjectDetailsPage(QWidget):
         body_layout = QVBoxLayout(body_wrap)
         body_layout.setContentsMargins(10, 8, 10, 10)
         body_layout.setSpacing(0)
+        body_layout.addWidget(left_box, 1)
+
+        main_content = QFrame()
+        main_content_layout = QVBoxLayout(main_content)
+        main_content_layout.setContentsMargins(0, 0, 0, 0)
+        main_content_layout.setSpacing(0)
+        main_content_layout.addWidget(checklist_panel)
+        main_content_layout.addWidget(body_wrap, 1)
+
         self.body_splitter = QSplitter(Qt.Horizontal)
-        self.body_splitter.addWidget(left_box)
+        self.body_splitter.addWidget(main_content)
         self.body_splitter.addWidget(self.preview_box)
         self.body_splitter.setChildrenCollapsible(True)
         self.body_splitter.setCollapsible(1, True)
         self.body_splitter.setStretchFactor(0, 3)
         self.body_splitter.setStretchFactor(1, 2)
-        body_layout.addWidget(self.body_splitter, 1)
-        root.addWidget(body_wrap, 1)
+        root.addWidget(self.body_splitter, 1)
 
         self.back_btn.clicked.connect(self.controller.show_projects)
         self.open_explorer_btn.clicked.connect(self.open_explorer)
@@ -2879,6 +3135,7 @@ class ProjectDetailsPage(QWidget):
                 "SELECT id, sr_no, req_file_name, description, status, linked_file_path, subfolder FROM checklist_items WHERE project_id=? ORDER BY subfolder, sr_no",
                 (self.project_id,),
             ).fetchall()
+            write_project_checklist_snapshot(self.folder_path, items)
         finally:
             conn.close()
 
@@ -3239,11 +3496,6 @@ class ProjectDetailsPage(QWidget):
         bh = self.preview_side_btn.height()
         bx = self.body_splitter.x() + int(sizes[0]) - (bw // 2)
         by = self.body_splitter.y() + max(0, (self.body_splitter.height() - bh) // 2)
-        table = getattr(self, "table", None)
-        if table is not None and table.viewport() is not None:
-            vp = table.viewport()
-            vp_top_left = vp.mapTo(self, QPoint(0, 0))
-            by = int(vp_top_left.y() + max(0, (vp.height() - bh) // 2) + int(self._preview_toggle_y_offset))
         max_x = max(0, self.width() - bw)
         max_y = max(0, self.height() - bh)
         bx = min(max(0, int(bx)), max_x)
@@ -4628,17 +4880,15 @@ class ViewTendersPage(QWidget):
         self.search_edit.textChanged.connect(self.on_search_changed)
         self.btn_manage_websites = QPushButton("Manage Websites")
         self.btn_clear_data = QPushButton("Clear Data")
-        self.btn_download_one = QPushButton("Download")
         self.btn_fetch_data = QPushButton("Fetch Data")
         self.btn_update_downloads = QPushButton("Update")
         self.btn_manage_websites.clicked.connect(self.manage_websites_dialog)
         self.btn_clear_data.clicked.connect(self.clear_saved_details_dialog)
-        self.btn_download_one.clicked.connect(self.run_single_download)
         self.btn_fetch_data.clicked.connect(self.run_fetch_server_data)
         self.btn_update_downloads.clicked.connect(self.run_update_download_flags)
         top_uniform_w = 112
         top_uniform_h = 29
-        for b in (self.btn_manage_websites, self.btn_download_one, self.btn_fetch_data, self.btn_update_downloads, self.btn_clear_data):
+        for b in (self.btn_manage_websites, self.btn_fetch_data, self.btn_update_downloads, self.btn_clear_data):
             b.setProperty("compact", True)
             b.setFixedHeight(top_uniform_h)
             if b is self.btn_manage_websites:
@@ -4654,10 +4904,9 @@ class ViewTendersPage(QWidget):
         top.addWidget(QLabel("Search:"))
         top.addWidget(self.search_edit)
         top.addWidget(self.btn_manage_websites)
-        top.addWidget(self.btn_download_one)
         top.addWidget(self.btn_fetch_data)
-        top.addWidget(self.btn_update_downloads)
         top.addStretch(1)
+        top.addWidget(self.btn_update_downloads)
         top.addWidget(self.btn_clear_data)
         controls_lay.addLayout(top)
 
@@ -4676,7 +4925,6 @@ class ViewTendersPage(QWidget):
         self.btn_filters = QPushButton("Filters")
         self.btn_advanced = QPushButton("Advanced")
         self.btn_manage_websites.setObjectName("ScraperManageButton")
-        self.btn_download_one.setObjectName("ScraperDownloadButton")
         self.btn_fetch_data.setObjectName("ScraperFetchDataButton")
         self.btn_update_downloads.setObjectName("ScraperUpdateButton")
         self.btn_clear_data.setObjectName("ScraperClearButton")
@@ -4803,15 +5051,14 @@ class ViewTendersPage(QWidget):
         self.table_orgs.installEventFilter(self)
         self.table_tenders.installEventFilter(self)
         self.table_archived.installEventFilter(self)
+        self.table_orgs.itemSelectionChanged.connect(self._refresh_scraper_action_labels)
+        self.table_tenders.itemSelectionChanged.connect(self._refresh_scraper_action_labels)
+        self.table_archived.itemSelectionChanged.connect(self._refresh_scraper_action_labels)
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self._restore_last_tab()
 
-        try:
-            if getattr(self.backend, "is_remote_mode", lambda: False)():
-                self.backend.sync_remote_state()
-        except Exception as e:
-            core.log_to_gui(f"Remote state sync skipped: {e}")
         self.refresh_sites()
+        self.refresh_backend_mode_ui()
         self.refresh_auto_fetch_settings()
         self.on_tab_changed(self.tabs.currentIndex())
 
@@ -5229,6 +5476,7 @@ class ViewTendersPage(QWidget):
             self.search_edit.blockSignals(False)
         self._update_action_buttons_for_tab(key)
         self.refresh_current_table_view()
+        self._refresh_scraper_action_labels()
 
     def _update_action_buttons_for_tab(self, key):
         show_map = {
@@ -5314,6 +5562,7 @@ class ViewTendersPage(QWidget):
         self.load_org_table()
         self.load_tender_table()
         self.load_archived_table()
+        self._refresh_scraper_action_labels()
 
     def refresh_current_table_view(self):
         if not all(hasattr(self, n) for n in ("table_orgs", "table_tenders", "table_archived")):
@@ -5488,6 +5737,7 @@ class ViewTendersPage(QWidget):
         self._fit_table_rows(self.table_orgs)
         self._apply_sort_indicator("orgs")
         self._schedule_table_reflow(self.table_orgs)
+        self._refresh_scraper_action_labels()
 
     def split_date_time_text(self, value):
         txt = str(value or "").strip()
@@ -5581,6 +5831,7 @@ class ViewTendersPage(QWidget):
         self._fit_table_rows(self.table_tenders)
         self._apply_sort_indicator("tenders")
         self._schedule_table_reflow(self.table_tenders)
+        self._refresh_scraper_action_labels()
 
     def load_archived_table(self):
         self.table_archived.setRowCount(0)
@@ -5625,6 +5876,92 @@ class ViewTendersPage(QWidget):
         self._fit_table_rows(self.table_archived)
         self._apply_sort_indicator("archived")
         self._schedule_table_reflow(self.table_archived)
+        self._refresh_scraper_action_labels()
+
+    def refresh_backend_mode_ui(self):
+        is_remote = bool(getattr(self.backend, "is_remote_mode", lambda: False)())
+        self.btn_fetch_data.setEnabled(is_remote)
+
+    def _has_marked_tenders_for_targets(self):
+        target_sites = self.get_target_site_ids()
+        if not target_sites:
+            return False
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            placeholders = ",".join("?" for _ in target_sites)
+            row = conn.execute(
+                f"""SELECT COUNT(*)
+                    FROM tenders
+                    WHERE website_id IN ({placeholders})
+                      AND COALESCE(is_downloaded,0)=1
+                      AND COALESCE(is_archived,0)=0""",
+                tuple(target_sites),
+            ).fetchone()
+            return int((row[0] if row else 0) or 0) > 0
+        finally:
+            conn.close()
+
+    def _selected_org_id(self):
+        rows = self.table_orgs.selectionModel().selectedRows() if self.table_orgs.selectionModel() is not None else []
+        if not rows:
+            return None
+        row = rows[0].row()
+        item = self.table_orgs.item(row, 1)
+        if not item:
+            return None
+        try:
+            return int(str(item.text()).strip())
+        except Exception:
+            return None
+
+    def _refresh_scraper_action_labels(self):
+        if not hasattr(self, "btn_download_selected"):
+            return
+        self.refresh_backend_mode_ui()
+        if self._has_marked_tenders_for_targets():
+            self.btn_download_selected.setText("Download Selected")
+        elif self.tabs.currentIndex() == 1 and self._selected_tender_db_id(archived=False) is not None:
+            self.btn_download_selected.setText("Download")
+        else:
+            self.btn_download_selected.setText("Download")
+
+    def _run_fetch_tenders_for_single_org(self, org_id):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT website_id, COALESCE(name,'') FROM organizations WHERE id=? LIMIT 1",
+                (int(org_id),),
+            ).fetchone()
+            if not row:
+                core.log_to_gui("Selected organization was not found.")
+                return
+            website_id = int(row[0] or 0)
+            org_name = str(row[1] or "").strip()
+            if getattr(self.backend, "is_remote_mode", lambda: False)():
+                self.backend.fetch_tenders_logic(website_id, selected_org_names=[org_name] if org_name else [])
+                return
+            snapshot = conn.execute(
+                "SELECT id, COALESCE(is_selected,0) FROM organizations WHERE website_id=?",
+                (website_id,),
+            ).fetchall()
+            conn.execute("UPDATE organizations SET is_selected=0 WHERE website_id=?", (website_id,))
+            conn.execute("UPDATE organizations SET is_selected=1 WHERE id=?", (int(org_id),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        try:
+            self.backend.fetch_tenders_logic(website_id)
+        finally:
+            conn = sqlite3.connect(core.DB_FILE)
+            try:
+                conn.executemany(
+                    "UPDATE organizations SET is_selected=? WHERE id=?",
+                    [(int(sel or 0), int(oid)) for oid, sel in snapshot],
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def _on_org_cell_action(self, row, col):
         if row < 0 or col < 0 or col >= len(self.org_cols):
@@ -5904,13 +6241,7 @@ class ViewTendersPage(QWidget):
         self.on_site_changed()
 
     def _sync_remote_scraper_state_if_needed(self):
-        if not getattr(self.backend, "is_remote_mode", lambda: False)():
-            return
-        try:
-            if hasattr(self.backend, "push_local_state"):
-                self.backend.push_local_state()
-        except Exception as e:
-            core.log_to_gui(f"Remote state push failed: {e}")
+        return
 
     def _log_scraper_execution_mode(self, action_name):
         if getattr(self.backend, "is_remote_mode", lambda: False)():
@@ -5939,6 +6270,24 @@ class ViewTendersPage(QWidget):
             else:
                 rows = conn.execute(
                     "SELECT DISTINCT TRIM(COALESCE(name,'')) FROM organizations WHERE website_id=? AND COALESCE(is_selected,0)=1",
+                    (site_id,),
+                ).fetchall()
+            return [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+        finally:
+            conn.close()
+
+    def _marked_local_tender_ids_for_site(self, site_id):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            if site_id is None:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(tender_id,'')) "
+                    "FROM tenders WHERE COALESCE(is_downloaded,0)=1 AND COALESCE(is_archived,0)=0"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(tender_id,'')) "
+                    "FROM tenders WHERE website_id=? AND COALESCE(is_downloaded,0)=1 AND COALESCE(is_archived,0)=0",
                     (site_id,),
                 ).fetchall()
             return [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
@@ -6043,7 +6392,6 @@ class ViewTendersPage(QWidget):
                 core.log_to_gui("Auto fetch skipped: no websites configured.")
                 self._mark_auto_fetch_run()
                 return
-            self._sync_remote_scraper_state_if_needed()
             core.log_to_gui("Auto fetch started for selected organizations and tenders.")
             for sid in target_sites:
                 self.backend.fetch_organisations_logic(sid)
@@ -6053,7 +6401,7 @@ class ViewTendersPage(QWidget):
                 self._mark_auto_fetch_run()
                 return
             for sid in eligible_sites:
-                self.backend.fetch_tenders_logic(sid)
+                self.backend.fetch_tenders_logic(sid, selected_org_names=self._selected_local_org_names_for_site(sid))
             core.log_to_gui("Auto fetch completed.")
             self._mark_auto_fetch_run()
 
@@ -6065,7 +6413,6 @@ class ViewTendersPage(QWidget):
     def run_fetch_orgs(self):
         def worker():
             self._log_scraper_execution_mode("Fetch organizations")
-            self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.fetch_organisations_logic(sid)
         self._run_bg(worker)
@@ -6087,16 +6434,31 @@ class ViewTendersPage(QWidget):
 
         def worker():
             self._log_scraper_execution_mode("Fetch tenders")
-            self._sync_remote_scraper_state_if_needed()
+            selected_org_id = self._selected_org_id() if self.tabs.currentIndex() == 0 else None
+            if selected_org_id is not None:
+                self._run_fetch_tenders_for_single_org(selected_org_id)
+                return
             eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_selected_orgs(sid)]
             if not eligible_sites:
                 core.log_to_gui("No organizations selected. Please select organizations first.")
                 return
             for sid in eligible_sites:
-                self.backend.fetch_tenders_logic(sid)
+                self.backend.fetch_tenders_logic(sid, selected_org_names=self._selected_local_org_names_for_site(sid))
         self._run_bg(worker)
 
     def run_download(self):
+        has_marked = self._has_marked_tenders_for_targets()
+        tender_db_id = None
+        mode = None
+        if not has_marked:
+            tender_db_id = self._selected_tender_db_id(archived=False) if self.tabs.currentIndex() == 1 else None
+            if tender_db_id is None:
+                core.log_to_gui("Select one tender or mark tenders as Yes for download.")
+                return
+            mode = self._ask_single_download_mode()
+            if not mode:
+                return
+
         def site_has_marked_tenders(site_id):
             conn = sqlite3.connect(core.DB_FILE)
             try:
@@ -6113,14 +6475,19 @@ class ViewTendersPage(QWidget):
                 conn.close()
 
         def worker():
-            self._log_scraper_execution_mode("Download tenders")
-            self._sync_remote_scraper_state_if_needed()
-            eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_marked_tenders(sid)]
-            if not eligible_sites:
-                core.log_to_gui("No tenders marked for download.")
+            self._log_scraper_execution_mode("Download selected tenders" if has_marked else "Single tender download")
+            if has_marked:
+                eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_marked_tenders(sid)]
+                if not eligible_sites:
+                    core.log_to_gui("No tenders marked for download.")
+                    return
+                for sid in eligible_sites:
+                    self.backend.download_tenders_logic(
+                        sid,
+                        target_tender_ids=self._marked_local_tender_ids_for_site(sid),
+                    )
                 return
-            for sid in eligible_sites:
-                self.backend.download_tenders_logic(sid)
+            self.backend.download_single_tender_logic(tender_db_id, mode)
         self._run_bg(worker)
 
     def run_status_check(self):
@@ -7492,7 +7859,7 @@ class AppSettingsPage(QWidget):
         self.projects_view_toggle_btn.clicked.connect(self.toggle_projects_create_view)
         self.test_backend_btn.clicked.connect(self.test_backend_connection)
         self.show_tender_info_chk.toggled.connect(self._on_show_tender_info_toggled)
-        self.backend_mode_combo.currentIndexChanged.connect(self._apply_backend_mode_ui)
+        self.backend_mode_combo.currentIndexChanged.connect(self._on_backend_mode_changed)
         self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
 
         self._pending_update_exe = ""
@@ -7539,6 +7906,23 @@ class AppSettingsPage(QWidget):
         self.scraper_auto_fetch_chk.setChecked(bool(core.get_user_setting("scraper_auto_fetch_enabled", False)))
         self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
         self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
+
+    def _on_backend_mode_changed(self):
+        self._apply_backend_mode_ui()
+        mode = str(self.backend_mode_combo.currentData() or "local").strip().lower()
+        if FRONTEND_REMOTE_ONLY:
+            mode = "remote"
+        try:
+            core.set_user_setting("backend_mode", mode)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.controller, "online_page") and self.controller.online_page is not None:
+                self.controller.online_page.refresh_backend_mode_ui()
+                self.controller.online_page._refresh_scraper_action_labels()
+                self.controller.online_page.refresh_auto_fetch_settings()
+        except Exception:
+            pass
 
     def save_settings(self):
         db_dir = str(self.db_dir_edit.text() or "").strip()
@@ -7590,6 +7974,8 @@ class AppSettingsPage(QWidget):
             if hasattr(self.controller, "project_details_page") and self.controller.project_details_page is not None:
                 self.controller.project_details_page.apply_tender_info_visibility_setting()
             if hasattr(self.controller, "online_page") and self.controller.online_page is not None:
+                self.controller.online_page.refresh_backend_mode_ui()
+                self.controller.online_page._refresh_scraper_action_labels()
                 self.controller.online_page.refresh_auto_fetch_settings()
             QMessageBox.information(self, "Settings", "Paths updated successfully.")
         except Exception as e:
