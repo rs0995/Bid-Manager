@@ -1,7 +1,7 @@
 {
   "viewtenders_selected_site": "1",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "orgs",
+  "viewtenders_last_tab": "logs",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
@@ -100,8 +100,8 @@
   "viewtenders_widths_archived": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 190, \"Title\": 360, \"Work Description\": 0, \"Value\": 130, \"EMD\": 0, \"Org Chain\": 0, \"Closing Date\": 0, \"Closing Time\": 0, \"Pre-Bid\": 0, \"Location\": 0, \"Category\": 0, \"Status\": 130, \"Select\": 88, \"Download\": 288}",
   "viewtenders_cols_archived": "[\"Sr\", \"Tender ID\", \"Title\", \"Value\", \"Status\", \"Select\", \"Download\"]",
   "viewtenders_sort_archived": "{\"column\": \"Status\", \"ascending\": false}",
-  "viewtenders_search_tenders": "",
-  "viewtenders_sort_tenders": "{\"column\": \"Select\", \"ascending\": false}",
+  "viewtenders_search_tenders": "Nagpur ",
+  "viewtenders_sort_tenders": "{\"column\": \"Org Chain\", \"ascending\": true}",
   "viewtenders_search_archived": "",
   "studio_ui_url": "http://localhost:9002",
   "main_last_view": "online",
@@ -111,7 +111,7 @@
   "viewtenders_order_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
   "viewtenders_order_archived": "[\"Sr\", \"Website\", \"Tender ID\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Status\", \"Select\", \"Download\"]",
   "main_window_maximized": true,
-  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAAAAABgAAATzAAABxAAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
+  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAQAAAB4AAAVgAAABygAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
   "viewtenders_search_orgs": "",
   "viewtenders_filters_tenders": "{}",
   "templates_page_column_widths": [
@@ -197,7 +197,7 @@
   "projects_cols_widths": "{\"Sr\": 52, \"ID\": 0, \"Tender Id\": 180, \"Name of Work\": 403, \"Client\": 191, \"Value\": 89, \"Prebid\": 91, \"Deadline\": 86, \"Time Remaining\": 164}",
   "projects_entry_mode": "popup",
   "update_directory": "",
-  "backend_mode": "local",
+  "backend_mode": "remote",
   "backend_url": "https://bid-manager-production.up.railway.app",
   "backend_api_key": "initial-client-key-1",
   "project_tender_extra_info_7": [
@@ -237,5 +237,47 @@
   "project_details_tender_meta_top_height": 186,
   "project_details_tender_meta_manual_height": true,
   "project_details_show_tender_info": true,
-  "update_manifest_url": ""
+  "update_manifest_url": "",
+  "scraper_auto_fetch_enabled": false,
+  "scraper_auto_fetch_interval_minutes": 30,
+  "project_details_table_layout_1": {
+    "widths": [
+      52,
+      380,
+      419,
+      120,
+      275,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_details_table_layout_2": {
+    "widths": [
+      52,
+      380,
+      419,
+      120,
+      275,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  }
 }

@@ -83,6 +83,12 @@ class BackendModeScraperProxy:
         url, api_key = self._remote_config()
         return self._mode() == "remote" and bool(url and api_key)
 
+    def is_remote_mode(self):
+        return self._mode() == "remote"
+
+    def is_local_mode(self):
+        return self._mode() != "remote"
+
     def _new_client(self):
         url, api_key = self._remote_config()
         if not url or not api_key:
@@ -146,10 +152,10 @@ class BackendModeScraperProxy:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         return copied_download_files
 
-    def _run_remote_action(self, action, payload):
+    def _run_remote_action(self, action, payload, sync_back=True):
         client = self._new_client()
         body = dict(payload or {})
-        job = client.create_job(action=action, payload=body, build_artifact=True)
+        job = client.create_job(action=action, payload=body, build_artifact=bool(sync_back))
         job_id = str(job.get("job_id") or "")
         if not job_id:
             raise RuntimeError("Remote job creation failed.")
@@ -173,7 +179,7 @@ class BackendModeScraperProxy:
                 raise RuntimeError(str(job.get("error") or "Remote job failed."))
             elif status == "completed":
                 result = job.get("result") or {}
-                if bool(result.get("artifact_available")):
+                if sync_back and bool(result.get("artifact_available")):
                     tmp_zip = os.path.join(tempfile.gettempdir(), f"bm_artifact_{job_id}.zip")
                     client.download_artifact(job_id, tmp_zip)
                     copied = self._apply_remote_artifact(tmp_zip)
@@ -186,12 +192,12 @@ class BackendModeScraperProxy:
             else:
                 time.sleep(1.0)
 
-    def _run_or_local(self, method_name, action, payload, *args, **kwargs):
+    def _run_or_local(self, method_name, action, payload, *args, sync_back_remote=False, **kwargs):
         if self._mode() == "remote":
             url, api_key = self._remote_config()
             if not url or not api_key:
                 raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
-            return self._run_remote_action(action=action, payload=payload)
+            return self._run_remote_action(action=action, payload=payload, sync_back=sync_back_remote)
         return getattr(self.local, method_name)(*args, **kwargs)
 
     def get_setting(self, key, default=None):
@@ -227,7 +233,7 @@ class BackendModeScraperProxy:
     def sync_remote_state(self):
         if not self._remote_enabled():
             return True
-        return self._run_remote_action(action="sync_state", payload={})
+        return self._run_remote_action(action="sync_state", payload={}, sync_back=True)
 
     def push_local_state(self):
         if not self._remote_enabled():
@@ -235,6 +241,7 @@ class BackendModeScraperProxy:
         return self._run_remote_action(
             action="sync_state",
             payload={"db_snapshot_base64": self._encode_local_db_b64()},
+            sync_back=False,
         )
 
     def fetch_tenders_logic(self, website_id):
@@ -289,6 +296,7 @@ class BackendModeScraperProxy:
         self._run_remote_action(
             action="deliver_tender_docs",
             payload={"source_tender_id": str(source_tender_id or "").strip(), "mode": str(mode or "full").strip().lower()},
+            sync_back=True,
         )
         safe_id = core.re.sub(r'[\\/*?:"<>|]', "", str(source_tender_id or "").strip())
         conn = sqlite3.connect(core.DB_FILE)
@@ -322,6 +330,150 @@ def auto_fit_table_rows(table, min_height=24, max_height=None):
             table.setRowHeight(row, min_height)
         elif max_height is not None and h > max_height:
             table.setRowHeight(row, max_height)
+
+
+def _project_metadata_path(folder_path):
+    return os.path.join(str(folder_path or "").strip(), ".bidmanager_project.json")
+
+
+def _project_index_path(root_folder=None):
+    root = str(root_folder or core.ROOT_FOLDER or "").strip()
+    root = core._resolve_path(root) if root else core._resolve_path(core.ROOT_FOLDER)
+    return os.path.join(root, ".bidmanager_projects_index.json")
+
+
+def _normalize_project_metadata(payload, folder_path=""):
+    folder = str(folder_path or payload.get("folder_path", "") or "").strip()
+    folder_name = os.path.basename(folder.rstrip("\\/")) if folder else ""
+    return {
+        "title": str(payload.get("title", "") or "").strip(),
+        "client_name": str(payload.get("client_name", "") or "").strip(),
+        "deadline": str(payload.get("deadline", "") or "").strip(),
+        "description": str(payload.get("description", "") or "").strip(),
+        "folder_path": folder,
+        "folder_name": folder_name,
+        "source_tender_id": str(payload.get("source_tender_id", "") or "").strip(),
+        "project_value": str(payload.get("project_value", "") or "").strip(),
+        "prebid": str(payload.get("prebid", "") or "").strip(),
+        "status": str(payload.get("status", "Active") or "Active").strip(),
+    }
+
+
+def _load_project_index(root_folder=None):
+    path = _project_index_path(root_folder)
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                return {
+                    "by_tender_id": dict(raw.get("by_tender_id") or {}),
+                    "by_folder_name": dict(raw.get("by_folder_name") or {}),
+                    "by_title": dict(raw.get("by_title") or {}),
+                }
+    except Exception:
+        pass
+    return {"by_tender_id": {}, "by_folder_name": {}, "by_title": {}}
+
+
+def _save_project_index(index, root_folder=None):
+    path = _project_index_path(root_folder)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2)
+    except Exception:
+        pass
+
+
+def log_project_metadata(payload, folder_path=""):
+    meta = _normalize_project_metadata(payload, folder_path)
+    index = _load_project_index(meta.get("folder_path"))
+    tender_id = str(meta.get("source_tender_id", "") or "").strip().lower()
+    folder_name = str(meta.get("folder_name", "") or "").strip().lower()
+    title = str(meta.get("title", "") or "").strip().lower()
+    if tender_id:
+        index["by_tender_id"][tender_id] = meta
+    if folder_name:
+        index["by_folder_name"][folder_name] = meta
+    if title:
+        index["by_title"][title] = meta
+    _save_project_index(index, meta.get("folder_path"))
+
+
+def lookup_project_metadata(source_tender_id="", title="", folder_name="", folder_path=""):
+    index = _load_project_index(folder_path or core.ROOT_FOLDER)
+    tender_key = str(source_tender_id or "").strip().lower()
+    if tender_key:
+        hit = index["by_tender_id"].get(tender_key)
+        if isinstance(hit, dict):
+            return dict(hit)
+    folder_key = str(folder_name or "").strip().lower()
+    if folder_key:
+        hit = index["by_folder_name"].get(folder_key)
+        if isinstance(hit, dict):
+            return dict(hit)
+    title_key = str(title or "").strip().lower()
+    if title_key:
+        hit = index["by_title"].get(title_key)
+        if isinstance(hit, dict):
+            return dict(hit)
+    return {}
+
+
+def merge_project_metadata(primary, fallback):
+    merged = dict(_normalize_project_metadata(fallback or {}, (fallback or {}).get("folder_path", "")))
+    current = _normalize_project_metadata(primary or {}, (primary or {}).get("folder_path", ""))
+    for key, value in current.items():
+        if str(value or "").strip():
+            merged[key] = value
+    return merged
+
+
+def write_project_folder_metadata(folder_path, payload):
+    folder = str(folder_path or "").strip()
+    if not folder:
+        return
+    try:
+        os.makedirs(folder, exist_ok=True)
+        meta = _normalize_project_metadata(payload, folder)
+        with open(_project_metadata_path(folder), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        log_project_metadata(meta, folder)
+    except Exception:
+        pass
+
+
+def read_project_folder_metadata(folder_path):
+    meta_path = _project_metadata_path(folder_path)
+    try:
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                logged = lookup_project_metadata(
+                    raw.get("source_tender_id", ""),
+                    raw.get("title", ""),
+                    os.path.basename(str(folder_path or "").rstrip("\\/")),
+                    folder_path,
+                )
+                return merge_project_metadata(raw, logged)
+    except Exception:
+        pass
+    folder_name = os.path.basename(str(folder_path or "").rstrip("\\/"))
+    fallback = {
+        "title": folder_name,
+        "client_name": "",
+        "deadline": "",
+        "description": "",
+        "folder_path": str(folder_path or "").strip(),
+        "source_tender_id": folder_name,
+        "project_value": "",
+        "prebid": "",
+        "status": "Active",
+    }
+    logged = lookup_project_metadata(folder_name, folder_name, folder_name, folder_path)
+    return merge_project_metadata(fallback, logged)
 
 
 def _project_tender_info_key(project_id):
@@ -1370,6 +1522,20 @@ class CreateProjectDialog(QDialog):
             conn.commit()
         finally:
             conn.close()
+        write_project_folder_metadata(
+            folder_path,
+            {
+                "title": title,
+                "client_name": client_name,
+                "deadline": deadline,
+                "description": self.desc_edit.toPlainText().strip(),
+                "folder_path": folder_path,
+                "source_tender_id": source_tender_id,
+                "project_value": project_value,
+                "prebid": prebid,
+                "status": status,
+            },
+        )
 
         if tender_folder_path and os.path.isdir(tender_folder_path):
             copied = core.copy_tree_contents(tender_folder_path, std_folders["tender_docs"])
@@ -1429,14 +1595,21 @@ class ProjectsPage(QWidget):
         hlay.setContentsMargins(18, 8, 18, 8)
         title = QLabel("Projects")
         title.setObjectName("ProjectsHeaderTitle")
+        self.restore_projects_btn = QPushButton("Update")
+        self.restore_projects_btn.setObjectName("ProjectsUpdateButton")
+        self.restore_projects_btn.setProperty("compact", True)
+        self.restore_projects_btn.setFixedHeight(34)
+        self.restore_projects_btn.setMinimumWidth(98)
         self.open_folder_btn = QPushButton("Open Folder")
         self.open_folder_btn.setObjectName("ProjectsOpenFolderButton")
         self.open_folder_btn.setProperty("compact", True)
         self.open_folder_btn.setFixedHeight(34)
         self.open_folder_btn.setMinimumWidth(112)
+        self.restore_projects_btn.clicked.connect(self.restore_projects_from_folders)
         self.open_folder_btn.clicked.connect(self.open_projects_root_folder)
         hlay.addWidget(title)
         hlay.addStretch(1)
+        hlay.addWidget(self.restore_projects_btn)
         hlay.addWidget(self.open_folder_btn)
         root.addWidget(header)
 
@@ -1626,6 +1799,87 @@ class ProjectsPage(QWidget):
             return conn.execute(self.select_sql).fetchall()
         finally:
             conn.close()
+
+    def restore_projects_from_folders(self):
+        root_folder = core._resolve_path(core.ROOT_FOLDER)
+        os.makedirs(root_folder, exist_ok=True)
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            existing_rows = conn.execute(
+                "SELECT id, COALESCE(folder_path,''), COALESCE(source_tender_id,''), COALESCE(title,'') FROM projects"
+            ).fetchall()
+            existing_by_folder = {
+                os.path.normcase(os.path.abspath(str(folder_path or "").strip())): int(pid)
+                for pid, folder_path, _source_tender_id, _title in existing_rows
+                if str(folder_path or "").strip()
+            }
+            existing_by_tender = {
+                str(source_tender_id or "").strip().lower(): int(pid)
+                for pid, _folder_path, source_tender_id, _title in existing_rows
+                if str(source_tender_id or "").strip()
+            }
+            existing_by_title = {
+                str(title or "").strip().lower(): int(pid)
+                for pid, _folder_path, _source_tender_id, title in existing_rows
+                if str(title or "").strip()
+            }
+
+            inserted = 0
+            updated = 0
+            for name in sorted(os.listdir(root_folder), key=lambda x: x.lower()):
+                full = os.path.join(root_folder, name)
+                if not os.path.isdir(full):
+                    continue
+                meta = read_project_folder_metadata(full)
+                folder_abs = os.path.normcase(os.path.abspath(full))
+                source_tender_id = str(meta.get("source_tender_id", "") or "").strip()
+                title = str(meta.get("title", "") or "").strip() or name
+                pid = existing_by_folder.get(folder_abs)
+                if pid is None and source_tender_id:
+                    pid = existing_by_tender.get(source_tender_id.lower())
+                if pid is None and title:
+                    pid = existing_by_title.get(title.lower())
+
+                if pid is None:
+                    conn.execute(
+                        "INSERT INTO projects (title, client_name, deadline, description, folder_path, source_tender_id, project_value, prebid, status) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            title,
+                            str(meta.get("client_name", "") or "").strip(),
+                            str(meta.get("deadline", "") or "").strip(),
+                            str(meta.get("description", "") or "").strip(),
+                            full,
+                            source_tender_id or None,
+                            str(meta.get("project_value", "") or "").strip(),
+                            str(meta.get("prebid", "") or "").strip(),
+                            str(meta.get("status", "Active") or "Active").strip(),
+                        ),
+                    )
+                    write_project_folder_metadata(full, meta)
+                    inserted += 1
+                else:
+                    conn.execute(
+                        "UPDATE projects SET title=?, client_name=?, deadline=?, description=?, folder_path=?, source_tender_id=?, project_value=?, prebid=?, status=COALESCE(NULLIF(status,''), ?) WHERE id=?",
+                        (
+                            title,
+                            str(meta.get("client_name", "") or "").strip(),
+                            str(meta.get("deadline", "") or "").strip(),
+                            str(meta.get("description", "") or "").strip(),
+                            full,
+                            source_tender_id or None,
+                            str(meta.get("project_value", "") or "").strip(),
+                            str(meta.get("prebid", "") or "").strip(),
+                            str(meta.get("status", "Active") or "Active").strip(),
+                            pid,
+                        ),
+                    )
+                    updated += 1
+                    write_project_folder_metadata(full, meta)
+            conn.commit()
+        finally:
+            conn.close()
+        self.load_projects()
+        QMessageBox.information(self, "Update Projects", f"Projects restored from folders. Added {inserted}, updated {updated}.")
 
     def _format_row(self, sr, r):
         deadline_txt = str(r[6] or "")
@@ -2000,6 +2254,20 @@ class ProjectsPage(QWidget):
             conn.commit()
         finally:
             conn.close()
+        write_project_folder_metadata(
+            folder_path,
+            {
+                "title": title,
+                "client_name": client,
+                "deadline": self.form_deadline.dateTime().toString("dd-MM-yyyy hh:mm AP"),
+                "description": self.form_work.toPlainText().strip(),
+                "folder_path": folder_path,
+                "source_tender_id": source_tender_id,
+                "project_value": self.form_value.text().strip(),
+                "prebid": self.form_prebid.dateTime().toString("dd-MM-yyyy hh:mm AP"),
+                "status": "Active",
+            },
+        )
         current = [self.form_client.itemText(i).strip() for i in range(self.form_client.count())]
         if client and client not in current:
             current.append(client)
@@ -2043,6 +2311,20 @@ class ProjectsPage(QWidget):
             conn.commit()
         finally:
             conn.close()
+        write_project_folder_metadata(
+            folder_path,
+            {
+                "title": title,
+                "client_name": client,
+                "deadline": self.form_deadline.dateTime().toString("dd-MM-yyyy hh:mm AP"),
+                "description": self.form_work.toPlainText().strip(),
+                "folder_path": folder_path,
+                "source_tender_id": title,
+                "project_value": self.form_value.text().strip(),
+                "prebid": self.form_prebid.dateTime().toString("dd-MM-yyyy hh:mm AP"),
+                "status": "Active",
+            },
+        )
         self.load_projects()
 
     def _apply_entry_mode(self):
@@ -2311,7 +2593,7 @@ class ProjectDetailsPage(QWidget):
         self.back_btn.setProperty("compact", True)
         self.title_lbl = QLabel("Project Details")
         self.title_lbl.setObjectName("ProjectTitleBarText")
-        self.open_explorer_btn = QPushButton("Open in Explorer")
+        self.open_explorer_btn = QPushButton("Open Folder")
         self.open_explorer_btn.setObjectName("ProjectOpenExplorerButton")
         self.open_explorer_btn.setProperty("compact", True)
         self.sync_btn = QPushButton("Update")
@@ -4348,19 +4630,23 @@ class ViewTendersPage(QWidget):
         self.btn_clear_data = QPushButton("Clear Data")
         self.btn_download_one = QPushButton("Download")
         self.btn_fetch_data = QPushButton("Fetch Data")
+        self.btn_update_downloads = QPushButton("Update")
         self.btn_manage_websites.clicked.connect(self.manage_websites_dialog)
         self.btn_clear_data.clicked.connect(self.clear_saved_details_dialog)
         self.btn_download_one.clicked.connect(self.run_single_download)
         self.btn_fetch_data.clicked.connect(self.run_fetch_server_data)
+        self.btn_update_downloads.clicked.connect(self.run_update_download_flags)
         top_uniform_w = 112
         top_uniform_h = 29
-        for b in (self.btn_manage_websites, self.btn_download_one, self.btn_fetch_data, self.btn_clear_data):
+        for b in (self.btn_manage_websites, self.btn_download_one, self.btn_fetch_data, self.btn_update_downloads, self.btn_clear_data):
             b.setProperty("compact", True)
             b.setFixedHeight(top_uniform_h)
             if b is self.btn_manage_websites:
                 b.setFixedWidth(top_uniform_w + 14)
             elif b is self.btn_fetch_data:
                 b.setFixedWidth(top_uniform_w + 8)
+            elif b is self.btn_update_downloads:
+                b.setFixedWidth(top_uniform_w - 10)
             else:
                 b.setFixedWidth(top_uniform_w)
         top.addWidget(QLabel("Website:"))
@@ -4370,6 +4656,7 @@ class ViewTendersPage(QWidget):
         top.addWidget(self.btn_manage_websites)
         top.addWidget(self.btn_download_one)
         top.addWidget(self.btn_fetch_data)
+        top.addWidget(self.btn_update_downloads)
         top.addStretch(1)
         top.addWidget(self.btn_clear_data)
         controls_lay.addLayout(top)
@@ -4391,6 +4678,7 @@ class ViewTendersPage(QWidget):
         self.btn_manage_websites.setObjectName("ScraperManageButton")
         self.btn_download_one.setObjectName("ScraperDownloadButton")
         self.btn_fetch_data.setObjectName("ScraperFetchDataButton")
+        self.btn_update_downloads.setObjectName("ScraperUpdateButton")
         self.btn_clear_data.setObjectName("ScraperClearButton")
         self.btn_fetch_orgs.setObjectName("ScraperFetchButton")
         self.btn_get_tenders.setObjectName("ScraperGetButton")
@@ -4519,7 +4807,8 @@ class ViewTendersPage(QWidget):
         self._restore_last_tab()
 
         try:
-            self.backend.sync_remote_state()
+            if getattr(self.backend, "is_remote_mode", lambda: False)():
+                self.backend.sync_remote_state()
         except Exception as e:
             core.log_to_gui(f"Remote state sync skipped: {e}")
         self.refresh_sites()
@@ -5615,11 +5904,95 @@ class ViewTendersPage(QWidget):
         self.on_site_changed()
 
     def _sync_remote_scraper_state_if_needed(self):
+        if not getattr(self.backend, "is_remote_mode", lambda: False)():
+            return
         try:
             if hasattr(self.backend, "push_local_state"):
                 self.backend.push_local_state()
         except Exception as e:
             core.log_to_gui(f"Remote state push failed: {e}")
+
+    def _log_scraper_execution_mode(self, action_name):
+        if getattr(self.backend, "is_remote_mode", lambda: False)():
+            core.log_to_gui(f"{action_name} started using remote backend.")
+        else:
+            core.log_to_gui(f"{action_name} started in local mode.")
+
+    def _count_local_orgs_for_site(self, site_id):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            if site_id is None:
+                row = conn.execute("SELECT COUNT(*) FROM organizations").fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) FROM organizations WHERE website_id=?", (site_id,)).fetchone()
+            return int((row[0] if row else 0) or 0)
+        finally:
+            conn.close()
+
+    def _selected_local_org_names_for_site(self, site_id):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            if site_id is None:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(name,'')) FROM organizations WHERE COALESCE(is_selected,0)=1"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT TRIM(COALESCE(name,'')) FROM organizations WHERE website_id=? AND COALESCE(is_selected,0)=1",
+                    (site_id,),
+                ).fetchall()
+            return [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+        finally:
+            conn.close()
+
+    def _limit_local_cached_server_data(self, site_id, selected_org_names):
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            if site_id is None:
+                if selected_org_names:
+                    placeholders = ",".join("?" for _ in selected_org_names)
+                    conn.execute(
+                        f"DELETE FROM tenders WHERE TRIM(COALESCE(org_chain,'')) NOT IN ({placeholders})",
+                        tuple(selected_org_names),
+                    )
+                else:
+                    conn.execute("DELETE FROM tenders")
+            else:
+                if selected_org_names:
+                    placeholders = ",".join("?" for _ in selected_org_names)
+                    conn.execute(
+                        f"DELETE FROM tenders WHERE website_id=? AND TRIM(COALESCE(org_chain,'')) NOT IN ({placeholders})",
+                        (site_id, *selected_org_names),
+                    )
+                else:
+                    conn.execute("DELETE FROM tenders WHERE website_id=?", (site_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _candidate_download_folder(self, tender_id, folder_path):
+        existing = str(folder_path or "").strip()
+        if existing and os.path.isdir(existing):
+            return existing
+        safe_id = core.re.sub(r'[\\/*?:"<>|]', "", str(tender_id or "").strip())
+        candidate = os.path.join(core.BASE_DOWNLOAD_DIRECTORY, safe_id)
+        if os.path.isdir(candidate):
+            return candidate
+        return ""
+
+    def _folder_has_downloaded_files(self, folder_path):
+        if not folder_path or not os.path.isdir(folder_path):
+            return False
+        try:
+            for root, _dirs, files in os.walk(folder_path):
+                for name in files:
+                    low = name.lower()
+                    if low.endswith(".crdownload") or low.endswith(".part"):
+                        continue
+                    return True
+        except Exception:
+            return False
+        return False
 
     def refresh_auto_fetch_settings(self):
         enabled = bool(core.get_user_setting("scraper_auto_fetch_enabled", False))
@@ -5691,6 +6064,7 @@ class ViewTendersPage(QWidget):
 
     def run_fetch_orgs(self):
         def worker():
+            self._log_scraper_execution_mode("Fetch organizations")
             self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.fetch_organisations_logic(sid)
@@ -5712,6 +6086,7 @@ class ViewTendersPage(QWidget):
                 conn.close()
 
         def worker():
+            self._log_scraper_execution_mode("Fetch tenders")
             self._sync_remote_scraper_state_if_needed()
             eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_selected_orgs(sid)]
             if not eligible_sites:
@@ -5738,6 +6113,7 @@ class ViewTendersPage(QWidget):
                 conn.close()
 
         def worker():
+            self._log_scraper_execution_mode("Download tenders")
             self._sync_remote_scraper_state_if_needed()
             eligible_sites = [sid for sid in self.get_target_site_ids() if site_has_marked_tenders(sid)]
             if not eligible_sites:
@@ -5750,6 +6126,7 @@ class ViewTendersPage(QWidget):
     def run_status_check(self):
         archived_mode = (self.tabs.currentIndex() == 2)
         def worker():
+            self._log_scraper_execution_mode("Status check")
             self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.check_tender_status_logic(sid, archived_only=archived_mode)
@@ -5757,6 +6134,7 @@ class ViewTendersPage(QWidget):
 
     def run_download_results(self):
         def worker():
+            self._log_scraper_execution_mode("Download results")
             self._sync_remote_scraper_state_if_needed()
             for sid in self.get_target_site_ids():
                 self.backend.download_tender_results_logic(sid)
@@ -5775,17 +6153,72 @@ class ViewTendersPage(QWidget):
             return
 
         def worker():
+            self._log_scraper_execution_mode("Single tender download")
             self._sync_remote_scraper_state_if_needed()
             self.backend.download_single_tender_logic(tender_db_id, mode)
         self._run_bg(worker)
 
     def run_fetch_server_data(self):
         def worker():
+            if not getattr(self.backend, "is_remote_mode", lambda: False)():
+                core.log_to_gui("Fetch Data is only available in remote mode. Local mode already uses the local database directly.")
+                return
             if hasattr(self.backend, "sync_remote_state"):
+                site_id = self.get_selected_site_id()
+                had_orgs = self._count_local_orgs_for_site(site_id) > 0
+                selected_orgs = self._selected_local_org_names_for_site(site_id)
                 self.backend.sync_remote_state()
-                core.log_to_gui("Fetched latest scraper data from server cache.")
+                if not had_orgs:
+                    self._limit_local_cached_server_data(site_id, [])
+                    core.log_to_gui("Fetched organizations from server cache.")
+                else:
+                    self._limit_local_cached_server_data(site_id, selected_orgs)
+                    if selected_orgs:
+                        core.log_to_gui("Fetched latest server data for selected organizations.")
+                    else:
+                        core.log_to_gui("No organizations selected. Fetched organization cache only.")
             else:
                 core.log_to_gui("Server data fetch is only available in remote mode.")
+        self._run_bg(worker, done_refresh=True, switch_to_logs=False)
+
+    def run_update_download_flags(self):
+        def worker():
+            core.ScraperBackend.ensure_download_tables()
+            site_id = self.get_selected_site_id()
+            conn = sqlite3.connect(core.DB_FILE)
+            try:
+                if site_id is None:
+                    rows = conn.execute(
+                        "SELECT id, COALESCE(tender_id,''), COALESCE(folder_path,'') FROM tenders"
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT id, COALESCE(tender_id,''), COALESCE(folder_path,'') FROM tenders WHERE website_id=?",
+                        (site_id,),
+                    ).fetchall()
+                updated = 0
+                for tender_db_id, tender_id, folder_path in rows:
+                    tender_id = str(tender_id or "").strip()
+                    candidate = self._candidate_download_folder(tender_id, folder_path)
+                    has_files = self._folder_has_downloaded_files(candidate)
+                    target = 1 if has_files else 0
+                    conn.execute(
+                        "UPDATE tenders SET is_downloaded=?, folder_path=? WHERE id=?",
+                        (target, str(candidate or "").strip(), int(tender_db_id)),
+                    )
+                    if has_files and candidate:
+                        try:
+                            for name in os.listdir(candidate):
+                                full = os.path.join(candidate, name)
+                                if os.path.isfile(full):
+                                    core.ScraperBackend.log_downloaded_file(tender_id, name, local_path=full)
+                        except Exception:
+                            pass
+                    updated += 1
+                conn.commit()
+            finally:
+                conn.close()
+            core.log_to_gui(f"Updated download flags for {updated} tender row(s) from local files.")
         self._run_bg(worker, done_refresh=True, switch_to_logs=False)
 
     def _ask_single_download_mode(self):
@@ -6027,6 +6460,9 @@ class ViewTendersPage(QWidget):
         note = QLabel("Websites are kept. Downloaded files on disk are not deleted.")
         note.setObjectName("SoftText")
         root.addWidget(note)
+        note2 = QLabel("Projects and Templates are local-only and are not cleared from this dialog.")
+        note2.setObjectName("SoftText")
+        root.addWidget(note2)
         root.addStretch(1)
 
         btns = QHBoxLayout()
@@ -6250,6 +6686,20 @@ class ViewTendersPage(QWidget):
                     copied = core.copy_tree_contents(tender_src, std_folders["tender_docs"])
                     if copied:
                         core.log_to_gui(f"Copied {copied} tender item(s) to project Tender Docs: {project_title}")
+                write_project_folder_metadata(
+                    folder_path,
+                    {
+                        "title": project_title,
+                        "client_name": str(org or "").strip(),
+                        "deadline": str(closing or "").strip(),
+                        "description": str(title or "").strip(),
+                        "folder_path": folder_path,
+                        "source_tender_id": source_tender_id,
+                        "project_value": str(project_value or "").strip(),
+                        "prebid": str(prebid or "").strip(),
+                        "status": "Active",
+                    },
+                )
                 created += 1
                 if org and str(org).strip() and str(org).strip() not in client_opts:
                     client_opts.append(str(org).strip())
