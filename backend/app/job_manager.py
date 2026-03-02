@@ -7,6 +7,7 @@ import shutil
 import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,37 @@ from .models import JobAction, JobView, utcnow
 
 def _safe_key_fragment(api_key: str) -> str:
     return "".join(ch for ch in api_key if ch.isalnum())[:12] or "client"
+
+
+@contextmanager
+def _temporary_selected_orgs(db_path: Path, website_id: int, selected_org_names):
+    names = [str(x).strip() for x in (selected_org_names or []) if str(x).strip()]
+    if not names:
+        yield
+        return
+    conn = core.sqlite3.connect(str(db_path))
+    try:
+        snapshot = conn.execute(
+            "SELECT id, COALESCE(is_selected,0) FROM organizations WHERE website_id=?",
+            (int(website_id),),
+        ).fetchall()
+        conn.execute("UPDATE organizations SET is_selected=0 WHERE website_id=?", (int(website_id),))
+        placeholders = ",".join("?" for _ in names)
+        conn.execute(
+            f"UPDATE organizations SET is_selected=1 WHERE website_id=? AND TRIM(COALESCE(name,'')) IN ({placeholders})",
+            (int(website_id), *names),
+        )
+        conn.commit()
+        yield
+    finally:
+        try:
+            conn.executemany(
+                "UPDATE organizations SET is_selected=? WHERE id=?",
+                [(int(sel or 0), int(org_id)) for org_id, sel in snapshot],
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _list_files_with_meta(root: Path) -> dict[str, tuple[int, int]]:
@@ -295,11 +327,33 @@ class JobManager:
             core.ScraperBackend.fetch_organisations_logic(int(payload["website_id"]))
             return
         if action == "fetch_tenders":
-            core.ScraperBackend.fetch_tenders_logic(int(payload["website_id"]))
+            website_id = int(payload["website_id"])
+            with _temporary_selected_orgs(
+                Path(core.DB_FILE),
+                website_id,
+                payload.get("selected_org_names") or [],
+            ):
+                core.ScraperBackend.fetch_tenders_logic(website_id)
             return
         if action == "download_tenders":
             target_ids = payload.get("target_db_ids")
+            target_tender_ids = [str(x).strip() for x in (payload.get("target_tender_ids") or []) if str(x).strip()]
             forced_mode = payload.get("forced_mode")
+            if target_tender_ids:
+                conn = core.sqlite3.connect(core.DB_FILE)
+                try:
+                    placeholders = ",".join("?" for _ in target_tender_ids)
+                    rows = conn.execute(
+                        f"""SELECT id
+                            FROM tenders
+                            WHERE website_id=?
+                              AND TRIM(COALESCE(tender_id,'')) IN ({placeholders})
+                              AND COALESCE(is_archived,0)=0""",
+                        (int(payload["website_id"]), *target_tender_ids),
+                    ).fetchall()
+                    target_ids = [int(r[0]) for r in rows]
+                finally:
+                    conn.close()
             core.ScraperBackend.download_tenders_logic(
                 int(payload["website_id"]),
                 target_db_ids=target_ids,

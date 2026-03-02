@@ -1,7 +1,7 @@
 {
   "viewtenders_selected_site": "1",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "logs",
+  "viewtenders_last_tab": "orgs",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
@@ -95,13 +95,13 @@
     "Select",
     "Download"
   ],
-  "viewtenders_widths_tenders": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 170, \"Title\": 260, \"Work Description\": 0, \"Value\": 89, \"EMD\": 73, \"Org Chain\": 128, \"Closing Date\": 102, \"Closing Time\": 116, \"Pre-Bid\": 171, \"Location\": 220, \"Category\": 140, \"Select\": 77, \"Download\": 120}",
-  "viewtenders_widths_orgs": "{\"Sr\": 48, \"Website\": 107, \"Name\": 700, \"Count\": 100, \"Select\": 293}",
+  "viewtenders_widths_tenders": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 170, \"Title\": 357, \"Work Description\": 0, \"Value\": 89, \"EMD\": 73, \"Org Chain\": 128, \"Closing Date\": 102, \"Closing Time\": 116, \"Pre-Bid\": 95, \"Location\": 220, \"Category\": 140, \"Select\": 77, \"Download\": 120}",
+  "viewtenders_widths_orgs": "{\"Sr\": 48, \"Website\": 107, \"Name\": 700, \"Count\": 77, \"Select\": 302}",
   "viewtenders_widths_archived": "{\"Sr\": 48, \"Website\": 0, \"Tender ID\": 190, \"Title\": 360, \"Work Description\": 0, \"Value\": 130, \"EMD\": 0, \"Org Chain\": 0, \"Closing Date\": 0, \"Closing Time\": 0, \"Pre-Bid\": 0, \"Location\": 0, \"Category\": 0, \"Status\": 130, \"Select\": 88, \"Download\": 288}",
   "viewtenders_cols_archived": "[\"Sr\", \"Tender ID\", \"Title\", \"Value\", \"Status\", \"Select\", \"Download\"]",
   "viewtenders_sort_archived": "{\"column\": \"Status\", \"ascending\": false}",
-  "viewtenders_search_tenders": "Nagpur ",
-  "viewtenders_sort_tenders": "{\"column\": \"Org Chain\", \"ascending\": true}",
+  "viewtenders_search_tenders": "",
+  "viewtenders_sort_tenders": "{\"column\": \"Pre-Bid\", \"ascending\": true}",
   "viewtenders_search_archived": "",
   "studio_ui_url": "http://localhost:9002",
   "main_last_view": "online",
@@ -194,7 +194,7 @@
   },
   "projects_cols_visibility": "{\"Sr\": false, \"ID\": true, \"Tender Id\": false, \"Name of Work\": false, \"Client\": false, \"Value\": false, \"Prebid\": false, \"Deadline\": false, \"Time Remaining\": false}",
   "projects_cols_order": "[\"Sr\", \"ID\", \"Tender Id\", \"Name of Work\", \"Client\", \"Value\", \"Prebid\", \"Deadline\", \"Time Remaining\"]",
-  "projects_cols_widths": "{\"Sr\": 52, \"ID\": 0, \"Tender Id\": 180, \"Name of Work\": 403, \"Client\": 191, \"Value\": 89, \"Prebid\": 91, \"Deadline\": 86, \"Time Remaining\": 164}",
+  "projects_cols_widths": "{\"Sr\": 52, \"ID\": 0, \"Tender Id\": 150, \"Name of Work\": 403, \"Client\": 191, \"Value\": 89, \"Prebid\": 91, \"Deadline\": 86, \"Time Remaining\": 172}",
   "projects_entry_mode": "popup",
   "update_directory": "",
   "backend_mode": "remote",
@@ -279,5 +279,155 @@
       5,
       6
     ]
-  }
+  },
+  "project_details_table_layout_28": {
+    "widths": [
+      52,
+      210,
+      220,
+      120,
+      140,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_details_table_layout_41": {
+    "widths": [
+      52,
+      380,
+      419,
+      120,
+      275,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_tender_extra_info_39": [
+    {
+      "key": "Tender ID",
+      "value": "2026_MMRDA_1281444_1"
+    },
+    {
+      "key": "Name of Work",
+      "value": "Design and Construction work of Shahad ROB on Central Railway"
+    },
+    {
+      "key": "Client",
+      "value": "Mumbai Metropolitan Region Development Authority"
+    },
+    {
+      "key": "Value",
+      "value": "2,09,12,73,453"
+    },
+    {
+      "key": "Prebid",
+      "value": "09-Mar-2026 03:00 PM"
+    },
+    {
+      "key": "Deadline",
+      "value": "17-Mar-2026 06:00 PM"
+    },
+    {
+      "key": "Time Remaining",
+      "value": "-"
+    }
+  ],
+  "project_tender_extra_info_37": [
+    {
+      "key": "Tender ID",
+      "value": "2026_MMRDA_1270152_1"
+    },
+    {
+      "key": "Name of Work",
+      "value": "Design, Supply, Installation, Testing, Integration, Commissioning and Support for Training Software, AR and VR and AV Content Creation"
+    },
+    {
+      "key": "Client",
+      "value": "Mumbai Metropolitan Region Development Authority"
+    },
+    {
+      "key": "Value",
+      "value": "17,06,64,684"
+    },
+    {
+      "key": "Prebid",
+      "value": "06-Feb-2026 02:00 PM"
+    },
+    {
+      "key": "Deadline",
+      "value": "09-Mar-2026 03:00 PM"
+    },
+    {
+      "key": "Time Remaining",
+      "value": "-"
+    }
+  ],
+  "project_details_table_layout_36": {
+    "widths": [
+      52,
+      251,
+      267,
+      120,
+      556,
+      0,
+      0
+    ],
+    "order": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "project_tender_extra_info_36": [
+    {
+      "key": "Tender ID",
+      "value": "2026_MCGM_1276104_1"
+    },
+    {
+      "key": "Name of Work",
+      "value": "EPC TENDER FOR CONSTRUCTION OF BRIDGE FROM FISHERMEN COLONY -SENAPATI BAPAT MARG- TO WESTERN EXPRESS HIGHWAY"
+    },
+    {
+      "key": "Client",
+      "value": "Municipal Corporation of Greater Mumbai"
+    },
+    {
+      "key": "Value",
+      "value": "2,20,17,40,000"
+    },
+    {
+      "key": "Prebid",
+      "value": "18-Feb-2026 11:30 AM"
+    },
+    {
+      "key": "Deadline",
+      "value": "05-Mar-2026 04:00 PM"
+    },
+    {
+      "key": "Time Remaining",
+      "value": "-"
+    }
+  ]
 }
