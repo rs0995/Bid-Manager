@@ -8333,8 +8333,8 @@ class ServerStoragePage(QWidget):
             self.btn_sync_local,
         ):
             btn.setEnabled(scraper_ready and not self._job_running)
-        self.refresh_btn.setEnabled(admin_ready)
-        self.parent_btn.setEnabled(admin_ready)
+        self.refresh_btn.setEnabled(scraper_ready and not self._job_running)
+        self.parent_btn.setEnabled(scraper_ready and not self._job_running)
         self.delete_folder_btn.setEnabled(admin_ready)
         self.delete_older_btn.setEnabled(admin_ready)
         self.delete_days_edit.setEnabled(admin_ready)
