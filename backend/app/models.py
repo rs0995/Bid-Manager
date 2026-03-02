@@ -37,6 +37,20 @@ class ApiKeyIssueRequest(BaseModel):
     label: str = "client"
 
 
+class StorageListRequest(BaseModel):
+    relative_root: str = ""
+    max_entries: int = 2000
+
+
+class StorageDeleteFolderRequest(BaseModel):
+    relative_path: str
+
+
+class StorageDeleteOlderRequest(BaseModel):
+    days: int = Field(default=30, ge=1)
+    relative_root: str = ""
+
+
 class JobView(BaseModel):
     job_id: str
     action: JobAction

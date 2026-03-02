@@ -53,6 +53,40 @@ def _temporary_selected_orgs(db_path: Path, website_id: int, selected_org_names)
             conn.close()
 
 
+@contextmanager
+def _temporary_marked_tenders(db_path: Path, target_db_ids):
+    ids = []
+    try:
+        ids = [int(x) for x in (target_db_ids or [])]
+    except Exception:
+        ids = []
+    if not ids:
+        yield
+        return
+    conn = core.sqlite3.connect(str(db_path))
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        snapshot = conn.execute(
+            f"SELECT id, COALESCE(is_downloaded,0) FROM tenders WHERE id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
+        conn.execute(
+            f"UPDATE tenders SET is_downloaded=1 WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        conn.commit()
+        yield
+    finally:
+        try:
+            conn.executemany(
+                "UPDATE tenders SET is_downloaded=? WHERE id=?",
+                [(int(marked or 0), int(tender_id)) for tender_id, marked in snapshot],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _list_files_with_meta(root: Path) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
     if not root.exists():
@@ -354,11 +388,12 @@ class JobManager:
                     target_ids = [int(r[0]) for r in rows]
                 finally:
                     conn.close()
-            core.ScraperBackend.download_tenders_logic(
-                int(payload["website_id"]),
-                target_db_ids=target_ids,
-                forced_mode=forced_mode,
-            )
+            with _temporary_marked_tenders(Path(core.DB_FILE), target_ids):
+                core.ScraperBackend.download_tenders_logic(
+                    int(payload["website_id"]),
+                    target_db_ids=target_ids,
+                    forced_mode=forced_mode,
+                )
             return
         if action == "download_results":
             core.ScraperBackend.download_tender_results_logic(int(payload["website_id"]))

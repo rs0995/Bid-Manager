@@ -80,9 +80,33 @@ class BidApiClient:
     def decode_captcha_image(captcha_payload: dict[str, Any]) -> bytes:
         return base64.b64decode(str(captcha_payload.get("image_base64") or ""))
 
+    def admin_storage_usage(self, admin_key: str) -> dict[str, Any]:
+        return self._request("GET", "/v1/admin/storage/usage", headers={"X-Admin-Key": admin_key})
+
+    def admin_storage_list(
+        self,
+        admin_key: str,
+        relative_root: str = "",
+        max_entries: int = 2000,
+    ) -> dict[str, Any]:
+        body = {"relative_root": relative_root, "max_entries": int(max_entries)}
+        return self._request("POST", "/v1/admin/storage/list", json=body, headers={"X-Admin-Key": admin_key})
+
+    def admin_storage_delete_folder(self, admin_key: str, relative_path: str) -> dict[str, Any]:
+        body = {"relative_path": relative_path}
+        return self._request("POST", "/v1/admin/storage/delete-folder", json=body, headers={"X-Admin-Key": admin_key})
+
+    def admin_storage_delete_older(
+        self,
+        admin_key: str,
+        days: int,
+        relative_root: str = "",
+    ) -> dict[str, Any]:
+        body = {"days": int(days), "relative_root": relative_root}
+        return self._request("POST", "/v1/admin/storage/delete-older", json=body, headers={"X-Admin-Key": admin_key})
+
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         resp = self.session.request(method, url, timeout=self.timeout_seconds, **kwargs)
         resp.raise_for_status()
         return resp.json()
-

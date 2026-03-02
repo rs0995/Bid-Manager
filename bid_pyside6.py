@@ -7729,8 +7729,8 @@ class AppSettingsPage(QWidget):
         scroll.setWidget(content)
 
         content_root = QVBoxLayout(content)
-        content_root.setContentsMargins(18, 18, 18, 18)
-        content_root.setSpacing(12)
+        content_root.setContentsMargins(16, 14, 16, 14)
+        content_root.setSpacing(8)
 
         title = QLabel("Settings")
         title.setObjectName("PageTitle")
@@ -7738,6 +7738,8 @@ class AppSettingsPage(QWidget):
 
         form = QGridLayout()
         form.setColumnStretch(1, 1)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
         content_root.addLayout(form)
 
         self.db_dir_edit = QLineEdit()
@@ -7754,18 +7756,15 @@ class AppSettingsPage(QWidget):
         self.backend_url_edit = QLineEdit()
         self.backend_api_key_edit = QLineEdit()
         self.backend_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.backend_admin_key_edit = QLineEdit()
+        self.backend_admin_key_edit.setEchoMode(QLineEdit.Password)
         self.test_backend_btn = QPushButton("Test Backend")
         self.backend_test_status = QLabel("")
         self.backend_test_status.setObjectName("SoftText")
         self.backend_test_status.setWordWrap(True)
         self.backend_test_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.show_tender_info_chk = QCheckBox("Show tender info box in Project Details")
-        self.scraper_auto_fetch_chk = QCheckBox("Enable auto fetch for selected organizations and tenders")
-        self.scraper_auto_fetch_interval_edit = QLineEdit()
-        self.scraper_auto_fetch_interval_edit.setPlaceholderText("Minutes")
-        self.scraper_last_auto_fetch_label = QLabel("")
-        self.scraper_last_auto_fetch_label.setObjectName("SoftText")
-        self.scraper_run_auto_fetch_btn = QPushButton("Run Auto Fetch Now")
+        self.backend_test_status.setVisible(False)
+        self.show_tender_info_chk = QCheckBox()
 
         btn_db = QPushButton("Browse")
         btn_projects = QPushButton("Browse")
@@ -7791,25 +7790,37 @@ class AppSettingsPage(QWidget):
         form.addWidget(QLabel("Update Manifest URL:"), 4, 0)
         form.addWidget(self.update_manifest_url_edit, 4, 1, 1, 2)
 
-        form.addWidget(QLabel("Backend Mode:"), 5, 0)
-        form.addWidget(self.backend_mode_combo, 5, 1, 1, 2)
+        self.backend_mode_combo.setMaximumWidth(220)
+        self.backend_url_edit.setMinimumWidth(380)
+        self.backend_api_key_edit.setMaximumWidth(280)
+        self.backend_admin_key_edit.setMaximumWidth(280)
+        backend_row1 = QHBoxLayout()
+        backend_row1.setContentsMargins(0, 0, 0, 0)
+        backend_row1.setSpacing(8)
+        backend_row1.addWidget(QLabel("Mode:"))
+        backend_row1.addWidget(self.backend_mode_combo, 0)
+        backend_row1.addWidget(QLabel("URL:"))
+        backend_row1.addWidget(self.backend_url_edit, 1)
+        backend_row1_widget = QWidget()
+        backend_row1_widget.setLayout(backend_row1)
+        form.addWidget(QLabel("Backend:"), 5, 0)
+        form.addWidget(backend_row1_widget, 5, 1, 1, 2)
 
-        form.addWidget(QLabel("Backend URL:"), 6, 0)
-        form.addWidget(self.backend_url_edit, 6, 1, 1, 2)
+        backend_row2 = QHBoxLayout()
+        backend_row2.setContentsMargins(0, 0, 0, 0)
+        backend_row2.setSpacing(8)
+        backend_row2.addWidget(QLabel("API Key:"))
+        backend_row2.addWidget(self.backend_api_key_edit, 0)
+        backend_row2.addWidget(QLabel("Admin Key:"))
+        backend_row2.addWidget(self.backend_admin_key_edit, 0)
+        backend_row2.addWidget(self.test_backend_btn, 0)
+        backend_row2.addStretch(1)
+        backend_row2_widget = QWidget()
+        backend_row2_widget.setLayout(backend_row2)
+        form.addWidget(QLabel("Backend Access:"), 6, 0)
+        form.addWidget(backend_row2_widget, 6, 1, 1, 2)
 
-        form.addWidget(QLabel("Backend API Key:"), 7, 0)
-        form.addWidget(self.backend_api_key_edit, 7, 1)
-        form.addWidget(self.test_backend_btn, 7, 2)
-
-        form.addWidget(self.backend_test_status, 8, 1, 1, 2)
-        form.addWidget(self.show_tender_info_chk, 9, 1, 1, 2)
-        form.addWidget(QLabel("Online Tender Scraping:"), 10, 0)
-        form.addWidget(self.scraper_auto_fetch_chk, 10, 1, 1, 2)
-        form.addWidget(QLabel("Auto Fetch Interval (minutes):"), 11, 0)
-        form.addWidget(self.scraper_auto_fetch_interval_edit, 11, 1, 1, 2)
-        form.addWidget(QLabel("Last Auto Fetch:"), 12, 0)
-        form.addWidget(self.scraper_last_auto_fetch_label, 12, 1)
-        form.addWidget(self.scraper_run_auto_fetch_btn, 12, 2)
+        form.addWidget(self.backend_test_status, 7, 1, 1, 2)
 
         hint = QLabel(
             "Database path uses 'tender_manager.db' inside the selected DB folder. "
@@ -7818,35 +7829,38 @@ class AppSettingsPage(QWidget):
         hint.setObjectName("SoftText")
         content_root.addWidget(hint)
 
+        options_form = QGridLayout()
+        options_form.setColumnStretch(1, 1)
+        options_form.setHorizontalSpacing(10)
+        options_form.setVerticalSpacing(6)
+        self.projects_view_label = QLabel("")
+        self.projects_view_label.setObjectName("SoftText")
+        self.projects_view_toggle_btn = QPushButton("Switch View")
+        options_form.addWidget(QLabel("Show Tender Info:"), 0, 0)
+        options_form.addWidget(self.show_tender_info_chk, 0, 1, 1, 2, Qt.AlignLeft)
+        options_form.addWidget(QLabel("Projects Create View:"), 1, 0)
+        options_form.addWidget(self.projects_view_label, 1, 1)
+        options_form.addWidget(self.projects_view_toggle_btn, 1, 2)
+        content_root.addLayout(options_form)
+
         updates_row = QHBoxLayout()
+        updates_row.setContentsMargins(0, 2, 0, 0)
+        updates_row.setSpacing(8)
         self.check_update_btn = QPushButton("Check for Upgrade")
         self.install_update_btn = QPushButton("Install Upgrade")
         self.install_update_btn.setObjectName("PrimaryButton")
         self.install_update_btn.setEnabled(False)
         self.update_status = QLabel("")
         self.update_status.setObjectName("SoftText")
-        updates_row.addWidget(self.check_update_btn)
-        updates_row.addWidget(self.install_update_btn)
-        updates_row.addWidget(self.update_status, 1)
-        content_root.addLayout(updates_row)
-
-        view_row = QHBoxLayout()
-        self.projects_view_label = QLabel("")
-        self.projects_view_label.setObjectName("SoftText")
-        self.projects_view_toggle_btn = QPushButton("Switch View")
-        view_row.addWidget(QLabel("Projects Create View:"))
-        view_row.addWidget(self.projects_view_label, 1)
-        view_row.addWidget(self.projects_view_toggle_btn)
-        content_root.addLayout(view_row)
-
-        btns = QHBoxLayout()
         self.save_btn = QPushButton("Save")
         self.save_btn.setObjectName("PrimaryButton")
         reload_btn = QPushButton("Reload")
-        btns.addWidget(self.save_btn)
-        btns.addWidget(reload_btn)
-        btns.addStretch(1)
-        content_root.addLayout(btns)
+        updates_row.addWidget(self.check_update_btn)
+        updates_row.addWidget(self.install_update_btn)
+        updates_row.addWidget(self.update_status, 1)
+        updates_row.addWidget(self.save_btn)
+        updates_row.addWidget(reload_btn)
+        content_root.addLayout(updates_row)
 
         btn_db.clicked.connect(lambda: self._pick_dir_into(self.db_dir_edit))
         btn_projects.clicked.connect(lambda: self._pick_dir_into(self.projects_dir_edit))
@@ -7860,7 +7874,6 @@ class AppSettingsPage(QWidget):
         self.test_backend_btn.clicked.connect(self.test_backend_connection)
         self.show_tender_info_chk.toggled.connect(self._on_show_tender_info_toggled)
         self.backend_mode_combo.currentIndexChanged.connect(self._on_backend_mode_changed)
-        self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
 
         self._pending_update_exe = ""
         self._pending_update_version = ""
@@ -7889,6 +7902,7 @@ class AppSettingsPage(QWidget):
             self.backend_mode_combo.setCurrentIndex(idx)
         self.backend_url_edit.setText(str(core.get_user_setting("backend_url", "") or "").strip())
         self.backend_api_key_edit.setText(str(core.get_user_setting("backend_api_key", "") or "").strip())
+        self.backend_admin_key_edit.setText(str(core.get_user_setting("backend_admin_key", "") or "").strip())
         self._set_backend_test_status("")
         self._apply_backend_mode_ui()
         self.install_update_btn.setEnabled(False)
@@ -7903,9 +7917,6 @@ class AppSettingsPage(QWidget):
         self.projects_view_label.setText("Inline Form" if mode == "inline" else "Minimal Popup")
         self.projects_view_toggle_btn.setText("Switch to Popup" if mode == "inline" else "Switch to Inline")
         self.show_tender_info_chk.setChecked(bool(core.get_user_setting("project_details_show_tender_info", True)))
-        self.scraper_auto_fetch_chk.setChecked(bool(core.get_user_setting("scraper_auto_fetch_enabled", False)))
-        self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
-        self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
 
     def _on_backend_mode_changed(self):
         self._apply_backend_mode_ui()
@@ -7921,6 +7932,8 @@ class AppSettingsPage(QWidget):
                 self.controller.online_page.refresh_backend_mode_ui()
                 self.controller.online_page._refresh_scraper_action_labels()
                 self.controller.online_page.refresh_auto_fetch_settings()
+            if hasattr(self.controller, "server_storage_page") and self.controller.server_storage_page is not None:
+                self.controller.server_storage_page.refresh_configuration()
         except Exception:
             pass
 
@@ -7935,13 +7948,8 @@ class AppSettingsPage(QWidget):
             backend_mode = "remote"
         backend_url = str(self.backend_url_edit.text() or "").strip().rstrip("/")
         backend_api_key = str(self.backend_api_key_edit.text() or "").strip()
+        backend_admin_key = str(self.backend_admin_key_edit.text() or "").strip()
         show_tender_info = bool(self.show_tender_info_chk.isChecked())
-        auto_fetch_enabled = bool(self.scraper_auto_fetch_chk.isChecked())
-        try:
-            auto_fetch_minutes = int(str(self.scraper_auto_fetch_interval_edit.text() or "").strip() or "30")
-        except Exception:
-            auto_fetch_minutes = 30
-        auto_fetch_minutes = max(1, min(24 * 60, auto_fetch_minutes))
         if not db_dir or not proj_dir or not down_dir:
             QMessageBox.critical(self, "Settings", "All three paths are required.")
             return
@@ -7964,9 +7972,8 @@ class AppSettingsPage(QWidget):
             core.set_user_setting("backend_mode", backend_mode)
             core.set_user_setting("backend_url", backend_url)
             core.set_user_setting("backend_api_key", backend_api_key)
+            core.set_user_setting("backend_admin_key", backend_admin_key)
             core.set_user_setting("project_details_show_tender_info", show_tender_info)
-            core.set_user_setting("scraper_auto_fetch_enabled", auto_fetch_enabled)
-            core.set_user_setting("scraper_auto_fetch_interval_minutes", auto_fetch_minutes)
             if core._resolve_path(old_db) != core._resolve_path(core.DB_FILE):
                 core.init_db()
             if hasattr(self.controller, "projects_page") and self.controller.projects_page is not None:
@@ -7977,6 +7984,8 @@ class AppSettingsPage(QWidget):
                 self.controller.online_page.refresh_backend_mode_ui()
                 self.controller.online_page._refresh_scraper_action_labels()
                 self.controller.online_page.refresh_auto_fetch_settings()
+            if hasattr(self.controller, "server_storage_page") and self.controller.server_storage_page is not None:
+                self.controller.server_storage_page.refresh_configuration()
             QMessageBox.information(self, "Settings", "Paths updated successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Settings", f"Failed to save settings:\n{e}")
@@ -7989,33 +7998,17 @@ class AppSettingsPage(QWidget):
         except Exception:
             pass
 
-    def _format_last_auto_fetch_text(self):
-        raw = str(core.get_user_setting("scraper_last_auto_fetch_at", "") or "").strip()
-        if not raw:
-            return "Never"
-        try:
-            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            return dt.astimezone().strftime("%d-%b-%Y %I:%M:%S %p")
-        except Exception:
-            return raw
-
-    def _run_auto_fetch_now(self):
-        try:
-            page = self.controller._ensure_online_page()
-            page.run_auto_fetch_now()
-            self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
-        except Exception as e:
-            QMessageBox.critical(self, "Auto Fetch", f"Failed to start auto fetch:\n{e}")
-
     def _set_backend_test_status(self, message):
         txt = str(message or "").strip()
         if not txt:
             self.backend_test_status.clear()
+            self.backend_test_status.setVisible(False)
             return
         wrapped = "<div style='white-space:normal; overflow-wrap:anywhere; word-break:break-word;'>%s</div>" % (
             html.escape("\n".join(textwrap.wrap(txt, width=90, break_long_words=False, replace_whitespace=False)) or txt)
         )
         self.backend_test_status.setText(wrapped)
+        self.backend_test_status.setVisible(True)
 
     def _apply_backend_mode_ui(self):
         mode = str(self.backend_mode_combo.currentData() or "local").strip().lower()
@@ -8024,6 +8017,7 @@ class AppSettingsPage(QWidget):
         is_remote = mode == "remote"
         self.backend_url_edit.setEnabled(is_remote)
         self.backend_api_key_edit.setEnabled(is_remote)
+        self.backend_admin_key_edit.setEnabled(is_remote)
         self.test_backend_btn.setEnabled(is_remote)
         if not is_remote:
             self._set_backend_test_status("Local backend is enabled. Remote connectivity test is not required.")
@@ -8121,6 +8115,321 @@ class AppSettingsPage(QWidget):
         QApplication.instance().quit()
 
 
+class ServerStoragePage(QWidget):
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+        self._items = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title = QLabel("Server Storage")
+        title.setObjectName("PageTitle")
+        root.addWidget(title)
+
+        self.info_label = QLabel("")
+        self.info_label.setObjectName("SoftText")
+        self.info_label.setWordWrap(True)
+        root.addWidget(self.info_label)
+
+        scraper_form = QGridLayout()
+        scraper_form.setColumnStretch(1, 1)
+        scraper_form.setHorizontalSpacing(10)
+        scraper_form.setVerticalSpacing(8)
+        self.scraper_auto_fetch_chk = QCheckBox()
+        self.scraper_auto_fetch_interval_edit = QLineEdit()
+        self.scraper_auto_fetch_interval_edit.setPlaceholderText("Minutes")
+        self.scraper_last_auto_fetch_label = QLabel("")
+        self.scraper_last_auto_fetch_label.setObjectName("SoftText")
+        self.scraper_run_auto_fetch_btn = QPushButton("Run Auto Fetch Now")
+        scraper_form.addWidget(QLabel("Auto Fetch Selected Tenders:"), 0, 0)
+        scraper_form.addWidget(self.scraper_auto_fetch_chk, 0, 1, 1, 2, Qt.AlignLeft)
+        scraper_form.addWidget(QLabel("Auto Fetch Interval (minutes):"), 1, 0)
+        scraper_form.addWidget(self.scraper_auto_fetch_interval_edit, 1, 1, 1, 2)
+        scraper_form.addWidget(QLabel("Last Auto Fetch:"), 2, 0)
+        scraper_form.addWidget(self.scraper_last_auto_fetch_label, 2, 1)
+        scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 2, 2)
+        root.addLayout(scraper_form)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addWidget(QLabel("Relative Path:"))
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText("Leave blank for full server storage root")
+        controls.addWidget(self.path_edit, 1)
+        self.refresh_btn = QPushButton("Refresh")
+        self.parent_btn = QPushButton("Up")
+        controls.addWidget(self.refresh_btn)
+        controls.addWidget(self.parent_btn)
+        root.addLayout(controls)
+
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        self.usage_label = QLabel("Usage: -")
+        self.usage_label.setObjectName("SoftText")
+        self.counts_label = QLabel("")
+        self.counts_label.setObjectName("SoftText")
+        stats.addWidget(self.usage_label)
+        stats.addWidget(self.counts_label, 1)
+        root.addLayout(stats)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.delete_folder_btn = QPushButton("Delete Selected Folder")
+        self.delete_older_btn = QPushButton("Delete Older Than")
+        self.delete_days_edit = QLineEdit()
+        self.delete_days_edit.setPlaceholderText("Days")
+        self.delete_days_edit.setText("30")
+        self.delete_days_edit.setMaximumWidth(100)
+        actions.addWidget(self.delete_folder_btn)
+        actions.addWidget(self.delete_older_btn)
+        actions.addWidget(self.delete_days_edit)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setHorizontalHeaderLabels(["Type", "Path", "Size", "Modified"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        root.addWidget(self.table, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("SoftText")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        self.refresh_btn.clicked.connect(self.refresh_listing)
+        self.parent_btn.clicked.connect(self.go_parent)
+        self.delete_folder_btn.clicked.connect(self.delete_selected_folder)
+        self.delete_older_btn.clicked.connect(self.delete_older_files)
+        self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.scraper_auto_fetch_chk.toggled.connect(self._save_scraper_settings)
+        self.scraper_auto_fetch_interval_edit.editingFinished.connect(self._save_scraper_settings)
+        self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
+
+        self.refresh_configuration()
+
+    def refresh_configuration(self):
+        self.refresh_scraper_settings()
+        if self._remote_ready():
+            self.info_label.setText("Browse and manage files inside the server storage volume using the admin API.")
+            self.refresh_listing()
+            return
+        self._items = []
+        self.table.setRowCount(0)
+        self.usage_label.setText("Usage: -")
+        self.counts_label.setText("")
+        self.status_label.setText("")
+        if FRONTEND_REMOTE_ONLY:
+            self.info_label.setText("Remote mode is required. Configure Backend URL, API key, and Admin key in Settings.")
+        else:
+            self.info_label.setText("Switch Backend Mode to Remote and configure Backend URL, API key, and Admin key in Settings.")
+
+    def _remote_ready(self):
+        mode = "remote" if FRONTEND_REMOTE_ONLY else str(core.get_user_setting("backend_mode", "local") or "local").strip().lower()
+        if mode != "remote":
+            return False
+        return bool(self._backend_url() and self._backend_api_key() and self._backend_admin_key())
+
+    def _backend_url(self):
+        return str(core.get_user_setting("backend_url", "") or "").strip().rstrip("/")
+
+    def _backend_api_key(self):
+        return str(core.get_user_setting("backend_api_key", "") or "").strip()
+
+    def _backend_admin_key(self):
+        return str(core.get_user_setting("backend_admin_key", "") or "").strip()
+
+    def _client(self):
+        return BidApiClient(base_url=self._backend_url(), api_key=self._backend_api_key(), timeout_seconds=60)
+
+    def _set_status(self, text):
+        self.status_label.setText(str(text or "").strip())
+
+    def _format_last_auto_fetch_text(self):
+        raw = str(core.get_user_setting("scraper_last_auto_fetch_at", "") or "").strip()
+        if not raw:
+            return "Never"
+        try:
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%d-%b-%Y %I:%M:%S %p")
+        except Exception:
+            return raw
+
+    def refresh_scraper_settings(self):
+        old_block = self.scraper_auto_fetch_chk.blockSignals(True)
+        self.scraper_auto_fetch_chk.setChecked(bool(core.get_user_setting("scraper_auto_fetch_enabled", False)))
+        self.scraper_auto_fetch_chk.blockSignals(old_block)
+        old_edit_block = self.scraper_auto_fetch_interval_edit.blockSignals(True)
+        self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
+        self.scraper_auto_fetch_interval_edit.blockSignals(old_edit_block)
+        self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
+        enabled = self._remote_ready()
+        self.scraper_auto_fetch_chk.setEnabled(enabled)
+        self.scraper_auto_fetch_interval_edit.setEnabled(enabled)
+        self.scraper_run_auto_fetch_btn.setEnabled(enabled)
+
+    def _save_scraper_settings(self):
+        try:
+            minutes = int(str(self.scraper_auto_fetch_interval_edit.text() or "").strip() or "30")
+        except Exception:
+            minutes = 30
+        minutes = max(1, min(24 * 60, minutes))
+        self.scraper_auto_fetch_interval_edit.setText(str(minutes))
+        core.set_user_setting("scraper_auto_fetch_enabled", bool(self.scraper_auto_fetch_chk.isChecked()))
+        core.set_user_setting("scraper_auto_fetch_interval_minutes", minutes)
+        try:
+            if hasattr(self.controller, "online_page") and self.controller.online_page is not None:
+                self.controller.online_page.refresh_auto_fetch_settings()
+        except Exception:
+            pass
+
+    def _run_auto_fetch_now(self):
+        try:
+            page = self.controller._ensure_online_page()
+            page.run_auto_fetch_now()
+            self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
+            self._set_status("Auto fetch started.")
+        except Exception as e:
+            QMessageBox.critical(self, "Auto Fetch", f"Failed to start auto fetch:\n{e}")
+
+    def _format_size(self, size_bytes):
+        try:
+            value = float(size_bytes or 0)
+        except Exception:
+            value = 0.0
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while value >= 1024.0 and idx < len(units) - 1:
+            value /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(value)} {units[idx]}"
+        return f"{value:.1f} {units[idx]}"
+
+    def _selected_item(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._items):
+            return None
+        return self._items[row]
+
+    def _populate_items(self, items):
+        self._items = list(items or [])
+        self.table.setRowCount(0)
+        for item in self._items:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            values = [
+                "Folder" if str(item.get("kind") or "") == "dir" else "File",
+                str(item.get("path") or ""),
+                self._format_size(item.get("size_bytes") or 0),
+                str(item.get("modified_utc") or ""),
+            ]
+            for col, value in enumerate(values):
+                it = QTableWidgetItem(value)
+                if col == 0:
+                    it.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, col, it)
+        if self.table.rowCount():
+            self.table.selectRow(0)
+
+    def refresh_listing(self):
+        if not self._remote_ready():
+            self.refresh_configuration()
+            return
+        try:
+            client = self._client()
+            root_path = str(self.path_edit.text() or "").strip()
+            usage = client.admin_storage_usage(self._backend_admin_key()).get("usage") or {}
+            listing = client.admin_storage_list(self._backend_admin_key(), relative_root=root_path, max_entries=3000)
+            self._populate_items(listing.get("items") or [])
+            self.usage_label.setText(f"Usage: {self._format_size(usage.get('total_bytes') or 0)}")
+            self.counts_label.setText(
+                f"Files: {int(usage.get('file_count') or 0)} | Folders: {int(usage.get('dir_count') or 0)}"
+            )
+            truncated = bool(listing.get("truncated"))
+            self._set_status("Listing refreshed." + (" Showing first 3000 entries." if truncated else ""))
+        except Exception as e:
+            self._set_status(f"Failed to load server storage: {e}")
+
+    def go_parent(self):
+        path = str(self.path_edit.text() or "").strip().replace("\\", "/").strip("/")
+        if not path:
+            return
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        self.path_edit.setText(parent)
+        self.refresh_listing()
+
+    def _on_item_double_clicked(self, item):
+        row = item.row()
+        if row < 0 or row >= len(self._items):
+            return
+        data = self._items[row]
+        if str(data.get("kind") or "") != "dir":
+            return
+        self.path_edit.setText(str(data.get("path") or ""))
+        self.refresh_listing()
+
+    def delete_selected_folder(self):
+        if not self._remote_ready():
+            self.refresh_configuration()
+            return
+        item = self._selected_item()
+        if not item:
+            QMessageBox.information(self, "Server Storage", "Select a folder first.")
+            return
+        if str(item.get("kind") or "") != "dir":
+            QMessageBox.information(self, "Server Storage", "Only folders can be deleted from this page.")
+            return
+        rel_path = str(item.get("path") or "")
+        ans = QMessageBox.question(self, "Delete Folder", f"Delete server folder?\n\n{rel_path}")
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            client = self._client()
+            client.admin_storage_delete_folder(self._backend_admin_key(), rel_path)
+            self.refresh_listing()
+            self._set_status(f"Deleted folder: {rel_path}")
+        except Exception as e:
+            self._set_status(f"Failed to delete folder: {e}")
+
+    def delete_older_files(self):
+        if not self._remote_ready():
+            self.refresh_configuration()
+            return
+        try:
+            days = int(str(self.delete_days_edit.text() or "").strip() or "30")
+        except Exception:
+            QMessageBox.warning(self, "Delete Older Files", "Enter a valid number of days.")
+            return
+        days = max(1, days)
+        rel_root = str(self.path_edit.text() or "").strip()
+        ans = QMessageBox.question(
+            self,
+            "Delete Older Files",
+            f"Delete server files older than {days} day(s) under:\n\n{rel_root or '/'}",
+        )
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            client = self._client()
+            result = client.admin_storage_delete_older(self._backend_admin_key(), days=days, relative_root=rel_root)
+            self.refresh_listing()
+            self._set_status(
+                f"Deleted {int(result.get('deleted_files') or 0)} file(s) and "
+                f"{int(result.get('deleted_empty_dirs') or 0)} empty folder(s)."
+            )
+        except Exception as e:
+            self._set_status(f"Failed to delete older files: {e}")
+
+
 class PlaceholderPage(QWidget):
     def __init__(self, title, text, button_text=None, on_click=None):
         super().__init__()
@@ -8174,9 +8483,10 @@ class BidManagerQt(QMainWindow):
         self.btn_projects = QPushButton("Projects")
         self.btn_online = QPushButton("Online Tenders")
         self.btn_templates = QPushButton("Templates")
+        self.btn_server_storage = QPushButton("Server Storage")
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-        for btn in (self.btn_projects, self.btn_online, self.btn_templates):
+        for btn in (self.btn_projects, self.btn_online, self.btn_templates, self.btn_server_storage):
             btn.setObjectName("NavButton")
             btn.setCursor(Qt.PointingHandCursor)
             sbl.addWidget(btn)
@@ -8194,6 +8504,7 @@ class BidManagerQt(QMainWindow):
         self.project_details_page = None
         self.online_page = None
         self.templates_page = None
+        self.server_storage_page = None
         self.settings_page = None
         self._projects_last_subview = "list"
         self._projects_last_pid = None
@@ -8206,6 +8517,7 @@ class BidManagerQt(QMainWindow):
         self.btn_projects.clicked.connect(self.open_projects_section)
         self.btn_online.clicked.connect(self.show_online_section)
         self.btn_templates.clicked.connect(self.show_templates_section)
+        self.btn_server_storage.clicked.connect(self.show_server_storage_section)
         self.btn_settings.clicked.connect(self.show_settings_section)
 
         last_main = str(core.get_user_setting("main_last_view", "projects") or "projects").strip().lower()
@@ -8213,6 +8525,8 @@ class BidManagerQt(QMainWindow):
             self.show_online_section()
         elif last_main == "templates":
             self.show_templates_section()
+        elif last_main == "server_storage":
+            self.show_server_storage_section()
         elif last_main == "settings":
             self.show_settings_section()
         else:
@@ -8254,6 +8568,11 @@ class BidManagerQt(QMainWindow):
             self.templates_page = TemplatesPage(self)
         return self.templates_page
 
+    def _ensure_server_storage_page(self):
+        if self.server_storage_page is None:
+            self.server_storage_page = ServerStoragePage(self)
+        return self.server_storage_page
+
     def _ensure_settings_page(self):
         if self.settings_page is None:
             self.settings_page = AppSettingsPage(self)
@@ -8279,6 +8598,8 @@ class BidManagerQt(QMainWindow):
             core.set_user_setting("main_last_view", "online")
         elif self.templates_page is not None and page is self.templates_page:
             core.set_user_setting("main_last_view", "templates")
+        elif self.server_storage_page is not None and page is self.server_storage_page:
+            core.set_user_setting("main_last_view", "server_storage")
         elif self.settings_page is not None and page is self.settings_page:
             core.set_user_setting("main_last_view", "settings")
         while self.content_layout.count():
@@ -8287,7 +8608,7 @@ class BidManagerQt(QMainWindow):
                 item.widget().setParent(None)
         self.content_layout.addWidget(page)
 
-        for btn in (self.btn_projects, self.btn_online, self.btn_templates, self.btn_settings):
+        for btn in (self.btn_projects, self.btn_online, self.btn_templates, self.btn_server_storage, self.btn_settings):
             btn.setProperty("active", btn is active_button)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
@@ -8312,6 +8633,11 @@ class BidManagerQt(QMainWindow):
 
     def show_templates_section(self):
         self.set_page(self._ensure_templates_page(), self.btn_templates)
+
+    def show_server_storage_section(self):
+        page = self._ensure_server_storage_page()
+        page.refresh_configuration()
+        self.set_page(page, self.btn_server_storage)
 
     def show_settings_section(self):
         self.set_page(self._ensure_settings_page(), self.btn_settings)
