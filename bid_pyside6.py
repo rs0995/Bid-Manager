@@ -247,7 +247,10 @@ class BackendModeScraperProxy:
                         os.remove(tmp_zip)
                     except Exception:
                         pass
-                    core.log_to_gui(f"Remote sync complete. Download files synced: {copied}")
+                    if action in {"fetch_organisations", "fetch_tenders"}:
+                        core.log_to_gui("Remote sync complete. Scraper data synced.")
+                    else:
+                        core.log_to_gui(f"Remote sync complete. Download files synced: {copied}")
                 return True
             else:
                 time.sleep(1.0)
@@ -422,6 +425,16 @@ class BackendModeScraperProxy:
         return self._run_remote_action(
             action="check_status",
             payload={"website_id": int(website_id), "archived_only": bool(archived_only)},
+            sync_back=False,
+        )
+
+    def archive_completed_server(self, website_id=None):
+        payload = {}
+        if website_id not in (None, ""):
+            payload["website_id"] = int(website_id)
+        return self._run_remote_action(
+            action="archive_completed",
+            payload=payload,
             sync_back=False,
         )
 
@@ -5253,7 +5266,7 @@ class ViewTendersPage(QWidget):
         tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         tbl.horizontalHeader().setSectionsMovable(True)
         tbl.horizontalHeader().setSectionsClickable(True)
-        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.horizontalHeader().setStretchLastSection(False)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         tbl.horizontalHeader().setSortIndicatorShown(False)
         tbl.horizontalHeader().sectionResized.connect(lambda *_args, t=tbl: self._schedule_table_reflow(t))
@@ -7890,6 +7903,8 @@ class AppSettingsPage(QWidget):
         self.backend_test_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.backend_test_status.setVisible(False)
         self.show_tender_info_chk = QCheckBox()
+        self.local_archive_interval_edit = QLineEdit()
+        self.local_archive_interval_edit.setMaximumWidth(84)
 
         btn_db = QPushButton("Browse")
         btn_projects = QPushButton("Browse")
@@ -7966,6 +7981,8 @@ class AppSettingsPage(QWidget):
         options_form.addWidget(QLabel("Projects Create View:"), 1, 0)
         options_form.addWidget(self.projects_view_label, 1, 1)
         options_form.addWidget(self.projects_view_toggle_btn, 1, 2)
+        options_form.addWidget(QLabel("Local Archive Interval (hours):"), 2, 0)
+        options_form.addWidget(self.local_archive_interval_edit, 2, 1, 1, 2, Qt.AlignLeft)
         content_root.addLayout(options_form)
 
         updates_row = QHBoxLayout()
@@ -8028,6 +8045,7 @@ class AppSettingsPage(QWidget):
         self.backend_url_edit.setText(str(core.get_user_setting("backend_url", "") or "").strip())
         self.backend_api_key_edit.setText(str(core.get_user_setting("backend_api_key", "") or "").strip())
         self.backend_admin_key_edit.setText(str(core.get_user_setting("backend_admin_key", "") or "").strip())
+        self.local_archive_interval_edit.setText(str(core.get_user_setting("local_archive_interval_hours", 12) or 12))
         self._set_backend_test_status("")
         self._apply_backend_mode_ui()
         self.install_update_btn.setEnabled(False)
@@ -8077,6 +8095,12 @@ class AppSettingsPage(QWidget):
         backend_api_key = str(self.backend_api_key_edit.text() or "").strip()
         backend_admin_key = str(self.backend_admin_key_edit.text() or "").strip()
         show_tender_info = bool(self.show_tender_info_chk.isChecked())
+        try:
+            local_archive_hours = int(str(self.local_archive_interval_edit.text() or "").strip() or "12")
+        except Exception:
+            local_archive_hours = 12
+        local_archive_hours = max(1, min(24 * 30, local_archive_hours))
+        self.local_archive_interval_edit.setText(str(local_archive_hours))
         if not db_dir or not proj_dir or not down_dir:
             QMessageBox.critical(self, "Settings", "All three paths are required.")
             return
@@ -8101,6 +8125,7 @@ class AppSettingsPage(QWidget):
             core.set_user_setting("backend_api_key", backend_api_key)
             core.set_user_setting("backend_admin_key", backend_admin_key)
             core.set_user_setting("project_details_show_tender_info", show_tender_info)
+            core.set_user_setting("local_archive_interval_hours", local_archive_hours)
             if core._resolve_path(old_db) != core._resolve_path(core.DB_FILE):
                 core.init_db()
             if hasattr(self.controller, "projects_page") and self.controller.projects_page is not None:
@@ -8115,6 +8140,8 @@ class AppSettingsPage(QWidget):
                 self.controller.server_storage_page.refresh_configuration()
             if hasattr(self.controller, "refresh_remote_ui_mode"):
                 self.controller.refresh_remote_ui_mode()
+            if hasattr(self.controller, "refresh_archive_schedule"):
+                self.controller.refresh_archive_schedule()
             QMessageBox.information(self, "Settings", "Paths updated successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Settings", f"Failed to save settings:\n{e}")
@@ -8314,6 +8341,9 @@ class ServerStoragePage(QWidget):
         self.scraper_auto_fetch_interval_edit = QLineEdit()
         self.scraper_auto_fetch_interval_edit.setPlaceholderText("Minutes")
         self.scraper_auto_fetch_interval_edit.setMaximumWidth(84)
+        self.server_archive_interval_edit = QLineEdit()
+        self.server_archive_interval_edit.setPlaceholderText("Hours")
+        self.server_archive_interval_edit.setMaximumWidth(84)
         self.scraper_last_auto_fetch_label = QLabel("")
         self.scraper_last_auto_fetch_label.setObjectName("SoftText")
         self.scraper_run_auto_fetch_btn = QPushButton("Run Auto Fetch Now")
@@ -8321,9 +8351,11 @@ class ServerStoragePage(QWidget):
         scraper_form.addWidget(self.scraper_auto_fetch_chk, 0, 1, Qt.AlignLeft)
         scraper_form.addWidget(QLabel("Interval (minutes):"), 0, 2)
         scraper_form.addWidget(self.scraper_auto_fetch_interval_edit, 0, 3)
-        scraper_form.addWidget(QLabel("Last Auto Fetch:"), 0, 4)
-        scraper_form.addWidget(self.scraper_last_auto_fetch_label, 0, 5)
-        scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 0, 6)
+        scraper_form.addWidget(QLabel("Server Archive (hours):"), 0, 4)
+        scraper_form.addWidget(self.server_archive_interval_edit, 0, 5)
+        scraper_form.addWidget(QLabel("Last Auto Fetch:"), 0, 6)
+        scraper_form.addWidget(self.scraper_last_auto_fetch_label, 0, 7)
+        scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 0, 8)
         root.addLayout(scraper_form)
 
         self.server_tabs = QTabWidget()
@@ -8441,6 +8473,7 @@ class ServerStoragePage(QWidget):
         self.table_archived.installEventFilter(self)
         self.scraper_auto_fetch_chk.toggled.connect(self._save_scraper_settings)
         self.scraper_auto_fetch_interval_edit.editingFinished.connect(self._save_scraper_settings)
+        self.server_archive_interval_edit.editingFinished.connect(self._save_scraper_settings)
         self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
         self.server_job_finished.connect(self._on_server_job_finished)
         self.server_data_sync_finished.connect(self._on_server_data_sync_finished)
@@ -8457,7 +8490,7 @@ class ServerStoragePage(QWidget):
         tbl.setSelectionMode(QTableWidget.ExtendedSelection)
         tbl.setAlternatingRowColors(True)
         tbl.setWordWrap(True)
-        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.horizontalHeader().setStretchLastSection(False)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         tbl.horizontalHeader().setSectionsMovable(True)
         tbl.horizontalHeader().setSectionsClickable(True)
@@ -8976,10 +9009,14 @@ class ServerStoragePage(QWidget):
         old_edit_block = self.scraper_auto_fetch_interval_edit.blockSignals(True)
         self.scraper_auto_fetch_interval_edit.setText(str(core.get_user_setting("scraper_auto_fetch_interval_minutes", 30) or 30))
         self.scraper_auto_fetch_interval_edit.blockSignals(old_edit_block)
+        old_archive_block = self.server_archive_interval_edit.blockSignals(True)
+        self.server_archive_interval_edit.setText(str(core.get_user_setting("server_archive_interval_hours", 12) or 12))
+        self.server_archive_interval_edit.blockSignals(old_archive_block)
         self.scraper_last_auto_fetch_label.setText(self._format_last_auto_fetch_text())
         enabled = self._remote_scraper_ready()
         self.scraper_auto_fetch_chk.setEnabled(enabled)
         self.scraper_auto_fetch_interval_edit.setEnabled(enabled)
+        self.server_archive_interval_edit.setEnabled(enabled)
         self.scraper_run_auto_fetch_btn.setEnabled(enabled)
 
     def _save_scraper_settings(self):
@@ -8989,11 +9026,20 @@ class ServerStoragePage(QWidget):
             minutes = 30
         minutes = max(1, min(24 * 60, minutes))
         self.scraper_auto_fetch_interval_edit.setText(str(minutes))
+        try:
+            archive_hours = int(str(self.server_archive_interval_edit.text() or "").strip() or "12")
+        except Exception:
+            archive_hours = 12
+        archive_hours = max(1, min(24 * 30, archive_hours))
+        self.server_archive_interval_edit.setText(str(archive_hours))
         core.set_user_setting("scraper_auto_fetch_enabled", bool(self.scraper_auto_fetch_chk.isChecked()))
         core.set_user_setting("scraper_auto_fetch_interval_minutes", minutes)
+        core.set_user_setting("server_archive_interval_hours", archive_hours)
         try:
             if hasattr(self.controller, "online_page") and self.controller.online_page is not None:
                 self.controller.online_page.refresh_auto_fetch_settings()
+            if hasattr(self.controller, "refresh_archive_schedule"):
+                self.controller.refresh_archive_schedule()
         except Exception:
             pass
 
@@ -9347,6 +9393,7 @@ class BidManagerQt(QMainWindow):
         self.setWindowTitle(f"Tender & Bid Manager Pro - PySide6 - v{core.APP_VERSION}")
         self.resize(1360, 880)
         self.archive_job_running = False
+        self.server_archive_job_running = False
         self._pending_online_refresh = False
         self.scraper_backend = BackendModeScraperProxy()
 
@@ -9444,6 +9491,21 @@ class BidManagerQt(QMainWindow):
             self._poll_timer.timeout.connect(self._poll_legacy_queues)
             self._poll_timer.start(200)
         self.start_daily_archive_scheduler()
+
+    def _local_archive_interval_hours(self):
+        try:
+            return max(1, min(24 * 30, int(str(core.get_user_setting("local_archive_interval_hours", 12) or "12").strip())))
+        except Exception:
+            return 12
+
+    def _server_archive_interval_hours(self):
+        try:
+            return max(1, min(24 * 30, int(str(core.get_user_setting("server_archive_interval_hours", 12) or "12").strip())))
+        except Exception:
+            return 12
+
+    def refresh_archive_schedule(self):
+        return
 
     def _ensure_project_details_page(self):
         if self.project_details_page is None:
@@ -9594,15 +9656,15 @@ class BidManagerQt(QMainWindow):
                 pass
 
     def start_daily_archive_scheduler(self):
-        # Match legacy behavior: first check after app has run for 1 hour.
-        QTimer.singleShot(60 * 60 * 1000, self._archive_scheduler_tick)
+        QTimer.singleShot(5 * 60 * 1000, self._archive_scheduler_tick)
 
     def _archive_scheduler_tick(self):
         self.run_daily_archive_if_due()
-        QTimer.singleShot(60 * 60 * 1000, self._archive_scheduler_tick)
+        QTimer.singleShot(5 * 60 * 1000, self._archive_scheduler_tick)
 
     def run_daily_archive_if_due(self):
         if self.archive_job_running:
+            self._run_server_archive_if_due()
             return
         last_run_raw = core.ScraperBackend.get_setting("last_auto_archive_utc")
         due = True
@@ -9611,12 +9673,13 @@ class BidManagerQt(QMainWindow):
                 last_run = datetime.datetime.fromisoformat(last_run_raw)
                 if last_run.tzinfo is None:
                     last_run = last_run.replace(tzinfo=datetime.UTC)
-                due = (datetime.datetime.now(datetime.UTC) - last_run) >= datetime.timedelta(hours=12)
+                due = (datetime.datetime.now(datetime.UTC) - last_run) >= datetime.timedelta(hours=self._local_archive_interval_hours())
             except Exception:
                 due = True
         if due:
             self.archive_job_running = True
             threading.Thread(target=self._daily_archive_worker, daemon=True).start()
+        self._run_server_archive_if_due()
 
     def _daily_archive_worker(self):
         total = 0
@@ -9632,9 +9695,9 @@ class BidManagerQt(QMainWindow):
                 archived_count=total,
                 archived_status_updated=0,
                 websites_count=websites_count,
-                notes="12-hour scheduled run",
+                notes=f"{self._local_archive_interval_hours()}-hour scheduled run",
             )
-            core.log_to_gui(f"Auto-archive complete (12-hour schedule). Archived {total} tenders.")
+            core.log_to_gui(f"Auto-archive complete ({self._local_archive_interval_hours()}-hour schedule). Archived {total} tenders.")
             self._pending_online_refresh = True
         except Exception as e:
             core.ScraperBackend.log_auto_archive_run(
@@ -9642,11 +9705,41 @@ class BidManagerQt(QMainWindow):
                 archived_count=total,
                 archived_status_updated=0,
                 websites_count=websites_count,
-                notes=f"12-hour scheduled run failed: {e}",
+                notes=f"{self._local_archive_interval_hours()}-hour scheduled run failed: {e}",
             )
             core.log_to_gui(f"Auto-archive failed: {e}")
         finally:
             self.archive_job_running = False
+
+    def _run_server_archive_if_due(self):
+        if self.server_archive_job_running:
+            return
+        if not bool(getattr(self.scraper_backend, "is_remote_mode", lambda: False)()):
+            return
+        last_run_raw = str(core.get_user_setting("server_last_auto_archive_utc", "") or "").strip()
+        due = True
+        if last_run_raw:
+            try:
+                last_run = datetime.datetime.fromisoformat(last_run_raw)
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=datetime.UTC)
+                due = (datetime.datetime.now(datetime.UTC) - last_run) >= datetime.timedelta(hours=self._server_archive_interval_hours())
+            except Exception:
+                due = True
+        if not due:
+            return
+        self.server_archive_job_running = True
+        threading.Thread(target=self._server_archive_worker, daemon=True).start()
+
+    def _server_archive_worker(self):
+        try:
+            self.scraper_backend.archive_completed_server()
+            core.set_user_setting("server_last_auto_archive_utc", datetime.datetime.now(datetime.UTC).isoformat())
+            core.log_to_gui(f"Server auto-archive complete ({self._server_archive_interval_hours()}-hour schedule).")
+        except Exception as e:
+            core.log_to_gui(f"Server auto-archive failed: {e}")
+        finally:
+            self.server_archive_job_running = False
 
     def _open_captcha_dialog(self, img_data):
         dlg = QDialog(self)

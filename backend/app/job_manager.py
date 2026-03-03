@@ -412,6 +412,22 @@ class JobManager:
                 archived_only=bool(payload.get("archived_only", False)),
             )
             return
+        if action == "archive_completed":
+            total = 0
+            websites = core.ScraperBackend.get_websites()
+            website_id = payload.get("website_id")
+            target_ids = [int(website_id)] if website_id not in (None, "") else [int(sid) for sid in websites.keys()]
+            for sid in target_ids:
+                total += int(core.ScraperBackend.archive_completed_tenders_logic(int(sid)) or 0)
+            core.ScraperBackend.set_setting("last_auto_archive_utc", datetime.now(timezone.utc).isoformat())
+            core.ScraperBackend.log_auto_archive_run(
+                status="success",
+                archived_count=total,
+                archived_status_updated=0,
+                websites_count=len(target_ids),
+                notes="remote scheduled/manual run",
+            )
+            return
         if action == "single_download":
             core.ScraperBackend.download_single_tender_logic(
                 int(payload["tender_db_id"]),

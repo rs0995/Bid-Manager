@@ -17,6 +17,7 @@ JobAction = Literal[
     "download_tenders",
     "download_results",
     "check_status",
+    "archive_completed",
     "single_download",
     "deliver_tender_docs",
 ]
