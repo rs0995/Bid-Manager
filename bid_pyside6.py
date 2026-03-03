@@ -252,6 +252,12 @@ class BackendModeScraperProxy:
             else:
                 time.sleep(1.0)
 
+    def _run_remote_ephemeral_action(self, action, payload, sync_back=True):
+        body = dict(payload or {})
+        body["_ephemeral_workspace"] = True
+        body["db_snapshot_base64"] = self._encode_local_db_b64()
+        return self._run_remote_action(action=action, payload=body, sync_back=sync_back)
+
     def _run_or_local(self, method_name, action, payload, *args, sync_back_remote=False, **kwargs):
         if self._mode() == "remote":
             url, api_key = self._remote_config()
@@ -283,13 +289,16 @@ class BackendModeScraperProxy:
         )
 
     def fetch_organisations_logic(self, website_id):
-        return self._run_or_local(
-            "fetch_organisations_logic",
-            action="fetch_organisations",
-            payload={"website_id": int(website_id)},
-            website_id=int(website_id),
-            sync_back_remote=True,
-        )
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            return self._run_remote_ephemeral_action(
+                action="fetch_organisations",
+                payload={"website_id": int(website_id)},
+                sync_back=True,
+            )
+        return self.local.fetch_organisations_logic(int(website_id))
 
     def sync_remote_state(self):
         if not self._remote_enabled():
@@ -311,7 +320,7 @@ class BackendModeScraperProxy:
             if not url or not api_key:
                 raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
             names = [str(x).strip() for x in (selected_org_names or []) if str(x).strip()]
-            return self._run_remote_action(
+            return self._run_remote_ephemeral_action(
                 action="fetch_tenders",
                 payload={"website_id": int(website_id), "selected_org_names": names},
                 sync_back=True,
@@ -323,11 +332,12 @@ class BackendModeScraperProxy:
             url, api_key = self._remote_config()
             if not url or not api_key:
                 raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
-            return self._run_remote_action(
+            return self._run_remote_ephemeral_action(
                 action="download_tenders",
                 payload={
                     "website_id": int(website_id),
                     "target_db_ids": target_db_ids,
+                    "target_tender_ids": target_tender_ids,
                     "forced_mode": forced_mode,
                 },
                 sync_back=True,
@@ -339,33 +349,40 @@ class BackendModeScraperProxy:
         )
 
     def check_tender_status_logic(self, website_id, archived_only=False):
-        return self._run_or_local(
-            "check_tender_status_logic",
-            action="check_status",
-            payload={"website_id": int(website_id), "archived_only": bool(archived_only)},
-            website_id=int(website_id),
-            archived_only=bool(archived_only),
-            sync_back_remote=True,
-        )
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            return self._run_remote_ephemeral_action(
+                action="check_status",
+                payload={"website_id": int(website_id), "archived_only": bool(archived_only)},
+                sync_back=True,
+            )
+        return self.local.check_tender_status_logic(int(website_id), archived_only=bool(archived_only))
 
     def download_tender_results_logic(self, website_id):
-        return self._run_or_local(
-            "download_tender_results_logic",
-            action="download_results",
-            payload={"website_id": int(website_id)},
-            website_id=int(website_id),
-            sync_back_remote=True,
-        )
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            return self._run_remote_ephemeral_action(
+                action="download_results",
+                payload={"website_id": int(website_id)},
+                sync_back=True,
+            )
+        return self.local.download_tender_results_logic(int(website_id))
 
     def download_single_tender_logic(self, tender_db_id, mode):
-        return self._run_or_local(
-            "download_single_tender_logic",
-            action="single_download",
-            payload={"tender_db_id": int(tender_db_id), "mode": str(mode)},
-            tender_db_id=int(tender_db_id),
-            mode=str(mode),
-            sync_back_remote=True,
-        )
+        if self._mode() == "remote":
+            url, api_key = self._remote_config()
+            if not url or not api_key:
+                raise RuntimeError("Remote backend is required. Configure Backend URL and API key in Settings.")
+            return self._run_remote_ephemeral_action(
+                action="single_download",
+                payload={"tender_db_id": int(tender_db_id), "mode": str(mode)},
+                sync_back=True,
+            )
+        return self.local.download_single_tender_logic(int(tender_db_id), str(mode))
 
     def fetch_organisations_server(self, website_id):
         return self._run_remote_action(
@@ -6349,10 +6366,7 @@ class ViewTendersPage(QWidget):
         self.on_site_changed()
 
     def _sync_remote_scraper_state_if_needed(self):
-        if not getattr(self.backend, "is_remote_mode", lambda: False)():
-            return
-        if hasattr(self.backend, "push_local_state"):
-            self.backend.push_local_state()
+        return
 
     def _log_scraper_execution_mode(self, action_name):
         if getattr(self.backend, "is_remote_mode", lambda: False)():
@@ -9458,11 +9472,8 @@ class BidManagerQt(QMainWindow):
 
     def refresh_remote_ui_mode(self):
         is_remote = bool(getattr(self.scraper_backend, "is_remote_mode", lambda: False)())
-        self.btn_online.setEnabled(not is_remote)
-        if is_remote and self.content_layout.count():
-            widget = self.content_layout.itemAt(0).widget()
-            if widget is self.online_page:
-                self.show_server_storage_section()
+        self.btn_online.setEnabled(True)
+        self.btn_server_storage.setEnabled(is_remote)
 
     def set_page(self, page, active_button):
         if page is None:
@@ -9515,9 +9526,6 @@ class BidManagerQt(QMainWindow):
         self.set_page(self.projects_page, self.btn_projects)
 
     def show_online_section(self):
-        if bool(getattr(self.scraper_backend, "is_remote_mode", lambda: False)()):
-            self.show_server_storage_section()
-            return
         self.set_page(self._ensure_online_page(), self.btn_online)
 
     def show_templates_section(self):

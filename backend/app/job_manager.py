@@ -208,10 +208,16 @@ class JobManager:
         log_stop: threading.Event | None = None
         bridge: threading.Thread | None = None
         log_thread: threading.Thread | None = None
+        ephemeral_workspace = False
+        user_root: Path | None = None
         try:
             with self._worker_lock:
                 self._set_status(job, "running")
-                user_root = self.server_data_dir / _safe_key_fragment(str(job.payload.get("_api_key_id", "")))
+                ephemeral_workspace = bool(job.payload.get("_ephemeral_workspace"))
+                if ephemeral_workspace:
+                    user_root = (self.server_data_dir / "_ephemeral" / job.job_id).resolve()
+                else:
+                    user_root = self.server_data_dir / _safe_key_fragment(str(job.payload.get("_api_key_id", "")))
                 user_db = user_root / "tender_manager.db"
                 user_projects = user_root / "projects"
                 user_downloads = user_root / "downloads"
@@ -252,7 +258,7 @@ class JobManager:
                 after = _list_files_with_meta(user_downloads)
                 changed_count = 0
                 if job.build_artifact:
-                    artifact_dir = user_root / "artifacts"
+                    artifact_dir = (self.server_data_dir / "_ephemeral_artifacts").resolve() if ephemeral_workspace else (user_root / "artifacts")
                     force_prefixes = job.payload.get("_artifact_include_prefixes") or []
                     artifact, changed_count = _build_changed_artifact(
                         job_id=job.job_id,
@@ -285,6 +291,8 @@ class JobManager:
                 bridge.join(timeout=1.5)
             if log_thread is not None:
                 log_thread.join(timeout=1.5)
+            if ephemeral_workspace and user_root is not None:
+                shutil.rmtree(user_root, ignore_errors=True)
             with self._lock:
                 job.pending_challenge_id = None
                 job.captcha = None

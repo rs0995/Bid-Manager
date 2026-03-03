@@ -1,7 +1,7 @@
 {
   "viewtenders_selected_site": "ALL",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "orgs",
+  "viewtenders_last_tab": "logs",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
@@ -104,7 +104,7 @@
   "viewtenders_sort_tenders": "{\"column\": \"Pre-Bid\", \"ascending\": true}",
   "viewtenders_search_archived": "",
   "studio_ui_url": "http://localhost:9002",
-  "main_last_view": "server_storage",
+  "main_last_view": "online",
   "viewtenders_cols_tenders": "[\"Sr\", \"Tender ID\", \"Title\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Select\", \"Download\"]",
   "viewtenders_order_tenders": "[\"Sr\", \"Website\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Select\", \"Pre-Bid\", \"Tender ID\", \"Location\", \"Category\", \"Download\"]",
   "viewtenders_cols_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
@@ -429,5 +429,7 @@
       "key": "Time Remaining",
       "value": "-"
     }
-  ]
+  ],
+  "server_control_org_selection_keys": "[\"1|Agriculture Marketing Board,Pune(Maharashtra)\", \"2|ADVANCED WEAPONS AND EQUIPMENT INDIA LTD-AWEIL\"]",
+  "server_control_tender_selection_keys": "[\"1|2026_AMBPN_1280815_1\"]"
 }
