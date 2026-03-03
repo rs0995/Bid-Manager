@@ -65,6 +65,14 @@ FRONTEND_REMOTE_ONLY = str(os.getenv("BID_FRONTEND_REMOTE_ONLY", "") or "").stri
 
 
 class BackendModeScraperProxy:
+    SCRAPER_SYNC_TABLES = (
+        "websites",
+        "organizations",
+        "tenders",
+        "downloaded_files",
+        "auto_archive_runs",
+    )
+
     def __init__(self):
         self.local = core.ScraperBackend
 
@@ -99,8 +107,62 @@ class BackendModeScraperProxy:
         db_path = core._resolve_path(core.DB_FILE)
         if not os.path.exists(db_path):
             core.init_db()
-        with open(db_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("ascii")
+        tmp_dir = tempfile.mkdtemp(prefix="bm_scraper_sync_")
+        tmp_db = os.path.join(tmp_dir, "scraper_sync.db")
+        try:
+            shutil.copy2(db_path, tmp_db)
+            conn = sqlite3.connect(tmp_db)
+            try:
+                conn.execute("PRAGMA foreign_keys=OFF")
+                keep = set(self.SCRAPER_SYNC_TABLES)
+                rows = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+                for row in rows:
+                    table_name = str(row[0] or "").strip()
+                    if not table_name or table_name in keep:
+                        continue
+                    try:
+                        conn.execute(f'DELETE FROM "{table_name}"')
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                conn.close()
+            with open(tmp_db, "rb") as f:
+                return base64.b64encode(f.read()).decode("ascii")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _merge_remote_scraper_db(self, state_db):
+        dst_db = core._resolve_path(core.DB_FILE)
+        os.makedirs(os.path.dirname(dst_db) or ".", exist_ok=True)
+        if not os.path.exists(dst_db):
+            core.init_db()
+        dst_conn = sqlite3.connect(dst_db)
+        try:
+            dst_conn.execute("PRAGMA foreign_keys=OFF")
+            attach_name = "remote_sync"
+            dst_conn.execute(f"ATTACH DATABASE ? AS {attach_name}", (state_db,))
+            try:
+                for table_name in self.SCRAPER_SYNC_TABLES:
+                    cols = dst_conn.execute(
+                        f"PRAGMA {attach_name}.table_info('{table_name}')"
+                    ).fetchall()
+                    if not cols:
+                        continue
+                    col_names = [str(col[1]) for col in cols]
+                    col_csv = ", ".join(f'"{name}"' for name in col_names)
+                    dst_conn.execute(f'DELETE FROM "{table_name}"')
+                    dst_conn.execute(
+                        f'INSERT INTO "{table_name}" ({col_csv}) '
+                        f'SELECT {col_csv} FROM {attach_name}."{table_name}"'
+                    )
+                dst_conn.commit()
+            finally:
+                dst_conn.execute(f"DETACH DATABASE {attach_name}")
+        finally:
+            dst_conn.close()
 
     def _merge_folder_tree(self, src_root, dst_root):
         copied = 0
@@ -130,9 +192,7 @@ class BackendModeScraperProxy:
 
             state_db = os.path.join(tmp_dir, "__state", "tender_manager.db")
             if os.path.isfile(state_db):
-                dst_db = core._resolve_path(core.DB_FILE)
-                os.makedirs(os.path.dirname(dst_db) or ".", exist_ok=True)
-                shutil.copy2(state_db, dst_db)
+                self._merge_remote_scraper_db(state_db)
 
             for item in os.listdir(tmp_dir):
                 if item == "__state":
@@ -7984,6 +8044,8 @@ class AppSettingsPage(QWidget):
                 self.controller.online_page.refresh_auto_fetch_settings()
             if hasattr(self.controller, "server_storage_page") and self.controller.server_storage_page is not None:
                 self.controller.server_storage_page.refresh_configuration()
+            if hasattr(self.controller, "refresh_remote_ui_mode"):
+                self.controller.refresh_remote_ui_mode()
         except Exception:
             pass
 
@@ -8036,6 +8098,8 @@ class AppSettingsPage(QWidget):
                 self.controller.online_page.refresh_auto_fetch_settings()
             if hasattr(self.controller, "server_storage_page") and self.controller.server_storage_page is not None:
                 self.controller.server_storage_page.refresh_configuration()
+            if hasattr(self.controller, "refresh_remote_ui_mode"):
+                self.controller.refresh_remote_ui_mode()
             QMessageBox.information(self, "Settings", "Paths updated successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Settings", f"Failed to save settings:\n{e}")
@@ -8171,6 +8235,10 @@ class ServerStoragePage(QWidget):
         self.controller = controller
         self._items = []
         self._job_running = False
+        self._sync_running = False
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(5000)
+        self._poll_timer.timeout.connect(self._poll_server_state)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
@@ -8186,11 +8254,12 @@ class ServerStoragePage(QWidget):
         root.addWidget(self.info_label)
 
         action_row = QHBoxLayout()
-        action_row.setSpacing(8)
+        action_row.setSpacing(6)
         action_row.addWidget(QLabel("Website:"))
         self.cb_sites = QComboBox()
-        self.cb_sites.setMinimumWidth(180)
-        self.cb_sites.setMaximumWidth(220)
+        self.cb_sites.setMinimumWidth(160)
+        self.cb_sites.setMaximumWidth(190)
+        self.cb_sites.setFixedHeight(28)
         action_row.addWidget(self.cb_sites)
         self.btn_fetch_orgs = QPushButton("Fetch Organizations")
         self.btn_get_tenders = QPushButton("Get Tenders")
@@ -8198,6 +8267,15 @@ class ServerStoragePage(QWidget):
         self.btn_download_results = QPushButton("Download Results")
         self.btn_check_status = QPushButton("Check Status")
         self.btn_sync_local = QPushButton("Fetch Data")
+        top_uniform_h = 29
+        action_btn_widths = {
+            self.btn_fetch_orgs: 168,
+            self.btn_get_tenders: 164,
+            self.btn_download_selected: 168,
+            self.btn_download_results: 168,
+            self.btn_check_status: 150,
+            self.btn_sync_local: 120,
+        }
         for btn in (
             self.btn_fetch_orgs,
             self.btn_get_tenders,
@@ -8207,32 +8285,56 @@ class ServerStoragePage(QWidget):
             self.btn_sync_local,
         ):
             btn.setProperty("compact", True)
-            btn.setFixedHeight(29)
+            btn.setFixedHeight(top_uniform_h)
+            btn.setFixedWidth(action_btn_widths.get(btn, 140))
             action_row.addWidget(btn)
         action_row.addStretch(1)
         root.addLayout(action_row)
 
         scraper_form = QGridLayout()
-        scraper_form.setColumnStretch(1, 1)
+        scraper_form.setColumnStretch(4, 1)
         scraper_form.setHorizontalSpacing(10)
-        scraper_form.setVerticalSpacing(8)
+        scraper_form.setVerticalSpacing(6)
         self.scraper_auto_fetch_chk = QCheckBox()
         self.scraper_auto_fetch_interval_edit = QLineEdit()
         self.scraper_auto_fetch_interval_edit.setPlaceholderText("Minutes")
+        self.scraper_auto_fetch_interval_edit.setMaximumWidth(84)
         self.scraper_last_auto_fetch_label = QLabel("")
         self.scraper_last_auto_fetch_label.setObjectName("SoftText")
         self.scraper_run_auto_fetch_btn = QPushButton("Run Auto Fetch Now")
         scraper_form.addWidget(QLabel("Auto Fetch Selected Tenders:"), 0, 0)
-        scraper_form.addWidget(self.scraper_auto_fetch_chk, 0, 1, 1, 2, Qt.AlignLeft)
-        scraper_form.addWidget(QLabel("Auto Fetch Interval (minutes):"), 1, 0)
-        scraper_form.addWidget(self.scraper_auto_fetch_interval_edit, 1, 1, 1, 2)
-        scraper_form.addWidget(QLabel("Last Auto Fetch:"), 2, 0)
-        scraper_form.addWidget(self.scraper_last_auto_fetch_label, 2, 1)
-        scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 2, 2)
+        scraper_form.addWidget(self.scraper_auto_fetch_chk, 0, 1, Qt.AlignLeft)
+        scraper_form.addWidget(QLabel("Interval (minutes):"), 0, 2)
+        scraper_form.addWidget(self.scraper_auto_fetch_interval_edit, 0, 3)
+        scraper_form.addWidget(QLabel("Last Auto Fetch:"), 0, 4)
+        scraper_form.addWidget(self.scraper_last_auto_fetch_label, 0, 5)
+        scraper_form.addWidget(self.scraper_run_auto_fetch_btn, 0, 6)
         root.addLayout(scraper_form)
 
         self.server_tabs = QTabWidget()
         root.addWidget(self.server_tabs, 1)
+
+        self.org_cols = list(ViewTendersPage.org_cols)
+        self.tender_cols = list(ViewTendersPage.tender_cols)
+        self.archived_cols = list(ViewTendersPage.archived_cols)
+        self.table_orgs = self._make_mirror_table(self.org_cols, hidden_cols={"OrgID"})
+        self.table_tenders = self._make_mirror_table(self.tender_cols, hidden_cols={"ID"})
+        self.table_archived = self._make_mirror_table(self.archived_cols, hidden_cols={"ID"})
+        orgs_tab = QWidget()
+        orgs_lay = QVBoxLayout(orgs_tab)
+        orgs_lay.setContentsMargins(0, 0, 0, 0)
+        orgs_lay.addWidget(self.table_orgs)
+        tenders_tab = QWidget()
+        tenders_lay = QVBoxLayout(tenders_tab)
+        tenders_lay.setContentsMargins(0, 0, 0, 0)
+        tenders_lay.addWidget(self.table_tenders)
+        archived_tab = QWidget()
+        archived_lay = QVBoxLayout(archived_tab)
+        archived_lay.setContentsMargins(0, 0, 0, 0)
+        archived_lay.addWidget(self.table_archived)
+        self.server_tabs.addTab(orgs_tab, "Organizations")
+        self.server_tabs.addTab(tenders_tab, "Active Tenders")
+        self.server_tabs.addTab(archived_tab, "Archived Tenders")
 
         storage_tab = QWidget()
         storage_root = QVBoxLayout(storage_tab)
@@ -8313,17 +8415,281 @@ class ServerStoragePage(QWidget):
         self.delete_folder_btn.clicked.connect(self.delete_selected_folder)
         self.delete_older_btn.clicked.connect(self.delete_older_files)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.table_orgs.cellClicked.connect(self._on_org_cell_action)
+        self.table_tenders.cellClicked.connect(lambda r, c: self._on_tender_cell_action(self.table_tenders, self.tender_cols, r, c, archived=False))
+        self.table_archived.cellClicked.connect(lambda r, c: self._on_tender_cell_action(self.table_archived, self.archived_cols, r, c, archived=True))
+        self.table_orgs.cellDoubleClicked.connect(self._on_org_cell_action)
+        self.table_tenders.cellDoubleClicked.connect(lambda r, c: self._on_tender_cell_action(self.table_tenders, self.tender_cols, r, c, archived=False))
+        self.table_archived.cellDoubleClicked.connect(lambda r, c: self._on_tender_cell_action(self.table_archived, self.archived_cols, r, c, archived=True))
+        self.table_orgs.installEventFilter(self)
+        self.table_tenders.installEventFilter(self)
+        self.table_archived.installEventFilter(self)
         self.scraper_auto_fetch_chk.toggled.connect(self._save_scraper_settings)
         self.scraper_auto_fetch_interval_edit.editingFinished.connect(self._save_scraper_settings)
         self.scraper_run_auto_fetch_btn.clicked.connect(self._run_auto_fetch_now)
 
         self.refresh_configuration()
 
+    def _make_mirror_table(self, headers, hidden_cols=None):
+        hidden_cols = hidden_cols or set()
+        tbl = QTableWidget(0, len(headers))
+        tbl.setHorizontalHeaderLabels(headers)
+        tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        tbl.setSelectionMode(QTableWidget.ExtendedSelection)
+        tbl.setAlternatingRowColors(True)
+        tbl.setWordWrap(True)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        tbl.horizontalHeader().setSectionsMovable(True)
+        tbl.horizontalHeader().setSectionsClickable(True)
+        widths = {
+            "Sr": 48,
+            "ID": 1,
+            "OrgID": 1,
+            "Select": 84,
+            "Download": 112,
+            "Website": 140,
+            "Name": 280,
+            "Tender ID": 180,
+            "Title": 280,
+            "Work Description": 280,
+            "Value": 120,
+            "EMD": 120,
+            "Org Chain": 220,
+            "Closing Date": 120,
+            "Closing Time": 110,
+            "Pre-Bid": 120,
+            "Location": 140,
+            "Category": 120,
+            "Status": 120,
+            "Count": 84,
+        }
+        for idx, name in enumerate(headers):
+            tbl.setColumnWidth(idx, widths.get(name, 120))
+            if name in hidden_cols:
+                tbl.setColumnHidden(idx, True)
+        rowfit_timer = QTimer(tbl)
+        rowfit_timer.setSingleShot(True)
+        rowfit_timer.timeout.connect(lambda t=tbl: auto_fit_table_rows(t, min_height=24, max_height=None))
+        tbl._rowfit_timer = rowfit_timer
+        return tbl
+
+    def _sync_mirror_tables(self):
+        if not self._remote_scraper_ready():
+            for table in (self.table_orgs, self.table_tenders, self.table_archived):
+                table.setRowCount(0)
+            return
+        try:
+            page = self.controller._ensure_online_page()
+            selected = self.get_selected_site_id()
+            target_data = "ALL" if selected is None else str(selected)
+            idx = page.cb_sites.findData(target_data)
+            if idx >= 0 and page.cb_sites.currentIndex() != idx:
+                page.cb_sites.setCurrentIndex(idx)
+            else:
+                page.on_site_changed()
+            self._copy_table(page.table_orgs, self.table_orgs, self.org_cols)
+            self._copy_table(page.table_tenders, self.table_tenders, self.tender_cols)
+            self._copy_table(page.table_archived, self.table_archived, self.archived_cols)
+        except Exception:
+            pass
+
+    def _copy_table(self, source, target, headers):
+        target.setRowCount(0)
+        for row in range(source.rowCount()):
+            new_row = target.rowCount()
+            target.insertRow(new_row)
+            for col in range(len(headers)):
+                src_item = source.item(row, col)
+                txt = str(src_item.text()) if src_item is not None else ""
+                item = QTableWidgetItem(txt)
+                if src_item is not None and src_item.textAlignment() & int(Qt.AlignCenter):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                target.setItem(new_row, col, item)
+        timer = getattr(target, "_rowfit_timer", None)
+        if timer is not None:
+            timer.start(0)
+
+    def _selected_tender_db_id(self, table, archived=False):
+        rows = table.selectionModel().selectedRows() if table.selectionModel() is not None else []
+        if not rows:
+            return None
+        row = rows[0].row()
+        item = table.item(row, 1)
+        if not item:
+            return None
+        try:
+            return int(str(item.text()).strip())
+        except Exception:
+            return None
+
+    def _get_selected_row_ids(self, table, id_col=1):
+        if table is None or table.selectionModel() is None:
+            return []
+        ids = []
+        for mi in table.selectionModel().selectedRows():
+            it = table.item(mi.row(), id_col)
+            if it is None:
+                continue
+            rid = str(it.text() or "").strip()
+            if rid:
+                ids.append(rid)
+        return ids
+
+    def _restore_selected_row_ids(self, table, selected_ids, id_col=1):
+        if table is None or table.selectionModel() is None:
+            return
+        id_set = {str(x).strip() for x in (selected_ids or []) if str(x).strip()}
+        if not id_set:
+            return
+        sel = table.selectionModel()
+        first_row = None
+        for row in range(table.rowCount()):
+            it = table.item(row, id_col)
+            rid = str(it.text() or "").strip() if it is not None else ""
+            if rid in id_set:
+                idx = table.model().index(row, 0)
+                sel.select(idx, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                if first_row is None:
+                    first_row = row
+        if first_row is not None:
+            table.setCurrentCell(first_row, 0, QItemSelectionModel.NoUpdate)
+
+    def _on_org_cell_action(self, row, col):
+        if row < 0 or col < 0 or col >= len(self.org_cols):
+            return
+        if self.org_cols[col] != "Select":
+            return
+        keep_ids = self._get_selected_row_ids(self.table_orgs, 1)
+        org_item = self.table_orgs.item(row, 1)
+        if not org_item:
+            return
+        try:
+            org_id = int(str(org_item.text()).strip())
+        except Exception:
+            return
+        select_idx = self.org_cols.index("Select")
+        curr = str(self.table_orgs.item(row, select_idx).text() if self.table_orgs.item(row, select_idx) else "No")
+        target = 0 if curr == "Yes" else 1
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            conn.execute("UPDATE organizations SET is_selected=? WHERE id=?", (target, org_id))
+            conn.commit()
+        finally:
+            conn.close()
+        self._sync_mirror_tables()
+        self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
+
+    def _on_tender_cell_action(self, table, cols, row, col, archived=False):
+        if row < 0 or col < 0 or col >= len(cols):
+            return
+        if cols[col] != "Select":
+            return
+        id_item = table.item(row, 1)
+        if not id_item:
+            return
+        try:
+            db_id = int(str(id_item.text()).strip())
+        except Exception:
+            return
+        keep_ids = self._get_selected_row_ids(table, 1)
+        select_idx = cols.index("Select")
+        curr = str(table.item(row, select_idx).text() if table.item(row, select_idx) else "No")
+        target = 0 if curr == "Yes" else 1
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            conn.execute("UPDATE tenders SET is_downloaded=? WHERE id=?", (target, db_id))
+            conn.commit()
+        finally:
+            conn.close()
+        self._sync_mirror_tables()
+        self._restore_selected_row_ids(table, keep_ids, 1)
+
+    def _toggle_selected_org_rows(self):
+        rows = self.table_orgs.selectionModel().selectedRows() if self.table_orgs.selectionModel() is not None else []
+        if not rows:
+            return False
+        updates = []
+        select_idx = self.org_cols.index("Select")
+        for mi in rows:
+            row = mi.row()
+            org_item = self.table_orgs.item(row, 1)
+            if not org_item:
+                continue
+            try:
+                org_id = int(str(org_item.text()).strip())
+            except Exception:
+                continue
+            curr = str(self.table_orgs.item(row, select_idx).text() if self.table_orgs.item(row, select_idx) else "No")
+            updates.append((0 if curr == "Yes" else 1, org_id))
+        if not updates:
+            return False
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            conn.executemany("UPDATE organizations SET is_selected=? WHERE id=?", updates)
+            conn.commit()
+        finally:
+            conn.close()
+        keep_ids = [str(org_id) for _target, org_id in updates]
+        self._sync_mirror_tables()
+        self._restore_selected_row_ids(self.table_orgs, keep_ids, 1)
+        return True
+
+    def _toggle_selected_tender_rows(self, table, cols):
+        rows = table.selectionModel().selectedRows() if table.selectionModel() is not None else []
+        if not rows:
+            return False
+        updates = []
+        select_idx = cols.index("Select")
+        for mi in rows:
+            row = mi.row()
+            id_item = table.item(row, 1)
+            if not id_item:
+                continue
+            try:
+                db_id = int(str(id_item.text()).strip())
+            except Exception:
+                continue
+            curr = str(table.item(row, select_idx).text() if table.item(row, select_idx) else "No")
+            updates.append((0 if curr == "Yes" else 1, db_id))
+        if not updates:
+            return False
+        conn = sqlite3.connect(core.DB_FILE)
+        try:
+            conn.executemany("UPDATE tenders SET is_downloaded=? WHERE id=?", updates)
+            conn.commit()
+        finally:
+            conn.close()
+        keep_ids = [str(db_id) for _target, db_id in updates]
+        self._sync_mirror_tables()
+        self._restore_selected_row_ids(table, keep_ids, 1)
+        return True
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
+            if obj is self.table_orgs:
+                if self._toggle_selected_org_rows():
+                    return True
+            elif obj is self.table_tenders:
+                if self._toggle_selected_tender_rows(self.table_tenders, self.tender_cols):
+                    return True
+            elif obj is self.table_archived:
+                if self._toggle_selected_tender_rows(self.table_archived, self.archived_cols):
+                    return True
+        return super().eventFilter(obj, event)
+
     def refresh_configuration(self):
         self.refresh_scraper_settings()
         self.refresh_sites()
         scraper_ready = self._remote_scraper_ready()
         admin_ready = self._remote_admin_ready()
+        if scraper_ready:
+            if not self._poll_timer.isActive():
+                self._poll_timer.start()
+        elif self._poll_timer.isActive():
+            self._poll_timer.stop()
         for btn in (
             self.btn_fetch_orgs,
             self.btn_get_tenders,
@@ -8342,13 +8708,16 @@ class ServerStoragePage(QWidget):
         if admin_ready:
             self.info_label.setText("Run server-only scraper actions here and manage files inside the server storage volume.")
             self.refresh_listing()
+            self._sync_mirror_tables()
             return
         if scraper_ready:
             self.info_label.setText("Remote scraper control is available. Showing the current API key's server data. Add the Backend Admin Key to browse and delete the full server volume.")
             self.refresh_listing()
+            self._sync_mirror_tables()
         elif FRONTEND_REMOTE_ONLY:
             self._items = []
             self.table.setRowCount(0)
+            self._sync_mirror_tables()
             self.usage_label.setText("Usage: -")
             self.counts_label.setText("")
             self.status_label.setText("")
@@ -8356,6 +8725,7 @@ class ServerStoragePage(QWidget):
         else:
             self._items = []
             self.table.setRowCount(0)
+            self._sync_mirror_tables()
             self.usage_label.setText("Usage: -")
             self.counts_label.setText("")
             self.status_label.setText("")
@@ -8634,9 +9004,44 @@ class ServerStoragePage(QWidget):
                 core.log_to_gui(f"{label} failed: {e}")
             finally:
                 self._job_running = False
-                QTimer.singleShot(0, self.refresh_configuration)
+                def _refresh():
+                    try:
+                        self.controller.scraper_backend.sync_remote_state()
+                    except Exception:
+                        pass
+                    self.refresh_configuration()
+                QTimer.singleShot(0, _refresh)
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _poll_server_state(self):
+        if self._sync_running or self._job_running or not self._remote_scraper_ready():
+            return
+        if not self.isVisible():
+            return
+        self._sync_running = True
+
+        def worker():
+            err = ""
+            try:
+                self.controller.scraper_backend.sync_remote_state()
+            except Exception as e:
+                err = str(e)
+
+            def finish():
+                self._sync_running = False
+                if err:
+                    self._set_status(f"Server sync failed: {err}")
+                else:
+                    self._sync_mirror_tables()
+                    if self.server_tabs.currentIndex() == 3:
+                        try:
+                            self.refresh_listing()
+                        except Exception:
+                            pass
+            QTimer.singleShot(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def run_fetch_orgs(self):
         def worker():
@@ -8791,6 +9196,7 @@ class BidManagerQt(QMainWindow):
             pass
         if bool(core.get_user_setting("main_window_maximized", False)):
             QTimer.singleShot(0, self.showMaximized)
+        self.refresh_remote_ui_mode()
 
     def _build_menu(self):
         self.menuBar().addMenu("Tools")
@@ -8826,6 +9232,14 @@ class BidManagerQt(QMainWindow):
         if self.settings_page is None:
             self.settings_page = AppSettingsPage(self)
         return self.settings_page
+
+    def refresh_remote_ui_mode(self):
+        is_remote = bool(getattr(self.scraper_backend, "is_remote_mode", lambda: False)())
+        self.btn_online.setEnabled(not is_remote)
+        if is_remote and self.content_layout.count():
+            widget = self.content_layout.itemAt(0).widget()
+            if widget is self.online_page:
+                self.show_server_storage_section()
 
     def set_page(self, page, active_button):
         if page is None:
@@ -8878,6 +9292,9 @@ class BidManagerQt(QMainWindow):
         self.set_page(self.projects_page, self.btn_projects)
 
     def show_online_section(self):
+        if bool(getattr(self.scraper_backend, "is_remote_mode", lambda: False)()):
+            self.show_server_storage_section()
+            return
         self.set_page(self._ensure_online_page(), self.btn_online)
 
     def show_templates_section(self):

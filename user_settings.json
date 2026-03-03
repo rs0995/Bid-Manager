@@ -1,7 +1,7 @@
 {
-  "viewtenders_selected_site": "1",
+  "viewtenders_selected_site": "ALL",
   "last_main_view": "ViewTenders",
-  "viewtenders_last_tab": "tenders",
+  "viewtenders_last_tab": "orgs",
   "viewtenders_sort_orgs": "{\"column\": \"Select\", \"ascending\": false}",
   "viewtenders_export_excel_cols": [
     "Sr",
@@ -111,7 +111,7 @@
   "viewtenders_order_orgs": "[\"Sr\", \"Website\", \"Name\", \"Count\", \"Select\"]",
   "viewtenders_order_archived": "[\"Sr\", \"Website\", \"Tender ID\", \"Title\", \"Work Description\", \"Value\", \"EMD\", \"Org Chain\", \"Closing Date\", \"Closing Time\", \"Pre-Bid\", \"Location\", \"Category\", \"Status\", \"Select\", \"Download\"]",
   "main_window_maximized": true,
-  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAAAAABgAAATpAAACvAAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
+  "main_window_geometry": "AdnQywADAAAAAAAA////+QAABf8AAAMvAAAAAAAAABgAAAWyAAACvAAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv",
   "viewtenders_search_orgs": "",
   "viewtenders_filters_tenders": "{}",
   "templates_page_column_widths": [
@@ -236,7 +236,7 @@
   ],
   "project_details_tender_meta_top_height": 186,
   "project_details_tender_meta_manual_height": true,
-  "project_details_show_tender_info": false,
+  "project_details_show_tender_info": true,
   "update_manifest_url": "",
   "scraper_auto_fetch_enabled": false,
   "scraper_auto_fetch_interval_minutes": 30,
